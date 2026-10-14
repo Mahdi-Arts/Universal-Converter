@@ -1,0 +1,171 @@
+<resources>
+    <string name="app_name">Universal Converter</string>
+    <string name="tagline">استودیو حرفه‌ای و آفلاین چندرسانه‌ای</string>
+
+    <!-- Navigation & Tabs -->
+    <string name="nav_home">خانه</string>
+    <string name="nav_compress">فشرده‌سازی</string>
+    <string name="nav_convert">تبدیل فرمت</string>
+    <string name="nav_edit">ویرایش ویدیو</string>
+    <string name="nav_audio">استخراج صدا</string>
+    <string name="nav_split">برش شبکه‌های اجتماعی</string>
+    <string name="nav_thumbnail">استودیو کاور</string>
+    <string name="nav_queue">صف پردازش</string>
+    <string name="nav_library">کتابخانه خروجی</string>
+    <string name="nav_settings">تنظیمات</string>
+
+    <!-- Actions -->
+    <string name="action_select_video">انتخاب ویدیو</string>
+    <string name="action_select_audio">انتخاب صدا</string>
+    <string name="action_select_media">انتخاب فایل چندرسانه‌ای</string>
+    <string name="action_start_process">شروع پردازش</string>
+    <string name="action_cancel">لغو</string>
+    <string name="action_retry">تلاش مجدد</string>
+    <string name="action_share">اشتراک‌گذاری</string>
+    <string name="action_open">باز کردن</string>
+    <string name="action_delete">حذف</string>
+    <string name="action_rename">تغییر نام</string>
+    <string name="action_save">ذخیره</string>
+    <string name="action_export">خروجی گرفتن</string>
+    <string name="action_preview">پیش‌نمایش</string>
+    <string name="action_clear_completed">پاکسازی موارد انجام شده</string>
+    <string name="action_confirm">تایید</string>
+    <string name="action_close">بستن</string>
+    <string name="action_apply">اعمال</string>
+
+    <!-- Compression Presets -->
+    <string name="preset_original">اصلی</string>
+    <string name="preset_high_quality">کیفیت بالا</string>
+    <string name="preset_balanced">متعادل (پیش‌نهادی)</string>
+    <string name="preset_web_optimized">بهینه‌شده برای وب</string>
+    <string name="preset_messenger">مناسب پیام‌رسان‌ها</string>
+    <string name="preset_small_size">حجم فوق‌العاده کم</string>
+    <string name="preset_target_size">حجم دلخواه دقیق</string>
+    <string name="preset_custom">شخصی‌سازی پیشرفته</string>
+
+    <!-- Compression Settings -->
+    <string name="label_target_size">حجم خروجی هدف</string>
+    <string name="label_resolution">رزولوشن</string>
+    <string name="label_video_bitrate">بیت‌ریت ویدیو</string>
+    <string name="label_frame_rate">نرخ فریم (FPS)</string>
+    <string name="label_video_codec">کدک ویدیو</string>
+    <string name="label_audio_codec">کدک صدا</string>
+    <string name="label_audio_bitrate">بیت‌ریت صدا</string>
+    <string name="label_audio_sample_rate">نرخ نمونه‌برداری</string>
+    <string name="label_audio_channels">کانال‌های صوتی</string>
+    <string name="label_preserve_audio">حفظ کیفیت صدا</string>
+    <string name="label_remove_audio">حذف صدا (بی‌صدا)</string>
+    <string name="label_preserve_metadata">حفظ متادیتا</string>
+    <string name="label_estimated_size">حجم تخمینی</string>
+    <string name="label_actual_size">حجم واقعی</string>
+    <string name="label_compression_ratio">درصد فشرده‌سازی</string>
+    <string name="desc_no_upscale">هرگز ویدیو بالاتر از وضوح اصلی بزرگ‌نمایی نمی‌شود</string>
+    <string name="desc_target_size_info">بیت‌ریت بهینه‌سازی شده به‌صورت خودکار محاسبه و در صورت فراتر رفتن حجم، تصحیح می‌شود.</string>
+
+    <!-- Conversion & Formats -->
+    <string name="label_output_format">فرمت خروجی</string>
+    <string name="format_mp4">MP4 (H.264 / AAC - سازگاری حداکثری)</string>
+    <string name="format_mov">MOV (اپل کوئیک‌تایم)</string>
+    <string name="format_webm">WebM (VP9 / Opus - استاندارد وب)</string>
+    <string name="format_gif">GIF (تصویر متحرک)</string>
+    <string name="codec_h264">H.264 / AVC (شتاب سخت‌افزاری)</string>
+    <string name="codec_h265">H.265 / HEVC (فوق فشرده)</string>
+    <string name="codec_unsupported">روی این دستگاه پشتیبانی نمی‌شود</string>
+    <string name="codec_hardware_accelerated">دارای شتاب سخت‌افزاری</string>
+    <string name="codec_software_fallback">کدک نرم‌افزاری</string>
+
+    <!-- Video Editor -->
+    <string name="editor_trim">برش و کوتاه کردن زمانی</string>
+    <string name="editor_crop">نسبت ابعاد کادر (Crop)</string>
+    <string name="editor_rotate">چرخش ویدیو</string>
+    <string name="editor_speed">سرعت پخش</string>
+    <string name="editor_crop_original">اصلی</string>
+    <string name="editor_crop_16_9">16:9 افقی (یوتیوب)</string>
+    <string name="editor_crop_9_16">9:16 عمودی (استوری / ریلز)</string>
+    <string name="editor_crop_1_1">1:1 مربعی (پست)</string>
+    <string name="editor_rotate_90">۹۰ درجه ساعتگرد</string>
+    <string name="editor_rotate_180">۱۸۰ درجه وارونه</string>
+    <string name="editor_rotate_270">۲۷۰ درجه پادساعتگرد</string>
+    <string name="editor_speed_normal">۱.۰x (عادی)</string>
+    <string name="editor_speed_slow">حرکت آهسته (Slow Motion)</string>
+    <string name="editor_speed_fast">حرکت تند (Fast Motion)</string>
+
+    <!-- Audio Extraction -->
+    <string name="audio_extract_title">استخراج و فشرده‌سازی صدا</string>
+    <string name="audio_format_m4a">M4A / AAC (کپی جریان بدون افت کیفیت)</string>
+    <string name="audio_format_mp3">MP3 (سازگار با همه پلیرها)</string>
+    <string name="audio_extract_no_reencode">جداسازی مستقیم صدا بدون انکود مجدد ویدیو</string>
+
+    <!-- Social Media Splitter -->
+    <string name="split_title">برش قطعه‌ای برای شبکه‌های اجتماعی</string>
+    <string name="split_mode_fixed_duration">مدت‌زمان‌های آماده</string>
+    <string name="split_mode_equal_parts">تقسیم به بخش‌های مساوی</string>
+    <string name="split_mode_max_size">محدودیت حجم فایل</string>
+    <string name="split_mode_custom">نشانه‌گذاری دستی</string>
+    <string name="split_preset_15s">۱۵ ثانیه (استوری اینستاگرام)</string>
+    <string name="split_preset_30s">۳۰ ثانیه (وضعیت واتساپ)</string>
+    <string name="split_preset_60s">۶۰ ثانیه (ریلز / تیک‌تاک / شورتس)</string>
+    <string name="split_engine_fast">برش فوق‌سریع (Stream Copy)</string>
+    <string name="split_engine_fast_desc">برش آنی بر روی فریم‌های کلیدی بدون افت کیفیت. ممکن است مرز چند میلی‌ثانیه‌ای تفاوت کند.</string>
+    <string name="split_engine_precise">برش دقیق (انکود مجدد)</string>
+    <string name="split_engine_precise_desc">انکود دقیق فریم‌به‌فریم برای برش با دقت میلی‌ثانیه‌ای.</string>
+    <string name="split_output_naming">نام‌گذاری فایل‌ها به صورت video_part_001.mp4 و غیره</string>
+    <string name="split_partial_safe">پشتیبانی از پایداری: بخش‌های با موفقیت انجام‌شده در صورت بروز خطا در ادامه‌ی کار حذف نخواهند شد.</string>
+
+    <!-- Thumbnail Studio -->
+    <string name="thumb_title">استودیو ساخت کاور ویدیو</string>
+    <string name="thumb_select_frame">انتخاب فریم دلخواه از تایم‌لاین</string>
+    <string name="thumb_add_text">افزودن متن به کاور</string>
+    <string name="thumb_text_hint">متن عنوان یا توضیحات را بنویسید…</string>
+    <string name="thumb_text_outline">خط دور متن (Outline)</string>
+    <string name="thumb_text_shadow">سایه متن (Shadow)</string>
+    <string name="thumb_filter_brightness">روشنایی</string>
+    <string name="thumb_filter_contrast">کنتراست</string>
+    <string name="thumb_filter_saturation">اشباع رنگ</string>
+    <string name="thumb_ai_assist">دستیار هوشمند (Gemini)</string>
+    <string name="thumb_ai_suggest_title">پیشنهاد تیتر جذاب</string>
+    <string name="thumb_ai_suggest_colors">پیشنهاد پالت رنگی کاور</string>
+    <string name="thumb_ai_prompt_refine">بهبود متن برای زمینه</string>
+    <string name="thumb_export_png">خروجی باکیفیت PNG</string>
+    <string name="thumb_export_jpg">خروجی فشرده JPEG</string>
+    <string name="thumb_export_webp">خروجی مدرن WebP</string>
+
+    <!-- Processing Queue & Jobs -->
+    <string name="queue_title">صف عملیات پردازش</string>
+    <string name="queue_empty">هیچ عملیاتی در صف در حال انجام نیست</string>
+    <string name="status_queued">در انتظار</string>
+    <string name="status_processing">در حال پردازش…</string>
+    <string name="status_completed">تکمیل شده</string>
+    <string name="status_failed">ناموفق</string>
+    <string name="status_cancelled">لغو شده</string>
+
+    <!-- Output Library -->
+    <string name="library_title">کتابخانه فایل‌های خروجی</string>
+    <string name="library_empty">هنوز هیچ فایلی خروجی گرفته نشده است.</string>
+    <string name="library_tab_all">همه</string>
+    <string name="library_tab_videos">ویدیوها</string>
+    <string name="library_tab_audio">صداها</string>
+    <string name="library_tab_images">کاورها</string>
+    <string name="delete_confirm_title">حذف فایل خروجی؟</string>
+    <string name="delete_confirm_message">آیا از حذف این فایل تولید شده اطمینان دارید؟ فایل اصلی ویدیوی شما بدون تغییر باقی می‌ماند.</string>
+
+    <!-- Settings & Privacy -->
+    <string name="settings_title">تنظیمات و قابلیت‌های سخت‌افزاری</string>
+    <string name="settings_language">Language / زبان</string>
+    <string name="settings_lang_en">English</string>
+    <string name="settings_lang_fa">فارسی (Persian)</string>
+    <string name="settings_theme">ظاهر و پوسته</string>
+    <string name="settings_theme_system">پیش‌فرض سیستم</string>
+    <string name="settings_theme_dark">حالت تاریک</string>
+    <string name="settings_theme_light">حالت روشن</string>
+    <string name="privacy_guarantee">تضمین ۱۰۰٪ حریم خصوصی آفلاین</string>
+    <string name="privacy_desc">کلیه عملیات تبدیل، فشرده‌سازی و ویرایش بر روی پردازنده دستگاه شما انجام می‌شود و هیچ فایلی به سرور ارسال نخواهد شد.</string>
+    <string name="device_hardware_title">کدک‌های سخت‌افزاری دستگاه</string>
+
+    <!-- Common Errors & Notifications -->
+    <string name="error_no_media_selected">لطفاً ابتدا یک فایل ویدیویی یا صوتی انتخاب کنید</string>
+    <string name="error_invalid_input">خواندن فایل چندرسانه‌ای ممکن نبود</string>
+    <string name="error_encoder_failed">خطای انکودر سخت‌افزاری. لطفاً پروفایل متعادل یا کدک H.264 را انتخاب کنید.</string>
+    <string name="error_low_storage">فضای ذخیره‌سازی دستگاه کافی نیست</string>
+    <string name="success_export">فایل با موفقیت در پوشه Universal Converter ذخیره شد!</string>
+</resources>

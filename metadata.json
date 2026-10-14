@@ -1,0 +1,6 @@
+{
+  "name": "Universal Converter",
+  "description": "Professional offline-first media converter, compressor, editor, splitter, and thumbnail studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

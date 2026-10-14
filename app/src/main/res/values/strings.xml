@@ -1,0 +1,171 @@
+<resources>
+    <string name="app_name">Universal Converter</string>
+    <string name="tagline">Professional Offline Multimedia Studio</string>
+
+    <!-- Navigation & Tabs -->
+    <string name="nav_home">Home</string>
+    <string name="nav_compress">Compress</string>
+    <string name="nav_convert">Convert</string>
+    <string name="nav_edit">Edit</string>
+    <string name="nav_audio">Audio</string>
+    <string name="nav_split">Split</string>
+    <string name="nav_thumbnail">Thumbnail</string>
+    <string name="nav_queue">Queue</string>
+    <string name="nav_library">Library</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Actions -->
+    <string name="action_select_video">Select Video</string>
+    <string name="action_select_audio">Select Audio</string>
+    <string name="action_select_media">Choose Media File</string>
+    <string name="action_start_process">Start Processing</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_share">Share</string>
+    <string name="action_open">Open</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_rename">Rename</string>
+    <string name="action_save">Save</string>
+    <string name="action_export">Export</string>
+    <string name="action_preview">Preview</string>
+    <string name="action_clear_completed">Clear Completed</string>
+    <string name="action_confirm">Confirm</string>
+    <string name="action_close">Close</string>
+    <string name="action_apply">Apply</string>
+
+    <!-- Compression Presets -->
+    <string name="preset_original">Original</string>
+    <string name="preset_high_quality">High Quality</string>
+    <string name="preset_balanced">Balanced</string>
+    <string name="preset_web_optimized">Web Optimized</string>
+    <string name="preset_messenger">Messenger / Chat</string>
+    <string name="preset_small_size">Small Size</string>
+    <string name="preset_target_size">Target Size</string>
+    <string name="preset_custom">Custom</string>
+
+    <!-- Compression Settings -->
+    <string name="label_target_size">Target Output Size</string>
+    <string name="label_resolution">Resolution</string>
+    <string name="label_video_bitrate">Video Bitrate</string>
+    <string name="label_frame_rate">Frame Rate (FPS)</string>
+    <string name="label_video_codec">Video Codec</string>
+    <string name="label_audio_codec">Audio Codec</string>
+    <string name="label_audio_bitrate">Audio Bitrate</string>
+    <string name="label_audio_sample_rate">Sample Rate</string>
+    <string name="label_audio_channels">Audio Channels</string>
+    <string name="label_preserve_audio">Preserve Audio</string>
+    <string name="label_remove_audio">Remove Audio (Mute)</string>
+    <string name="label_preserve_metadata">Preserve Metadata</string>
+    <string name="label_estimated_size">Estimated Size</string>
+    <string name="label_actual_size">Actual Size</string>
+    <string name="label_compression_ratio">Compression Ratio</string>
+    <string name="desc_no_upscale">Never upscales original video</string>
+    <string name="desc_target_size_info">Automatically calculates optimal bitrate and runs iterative correction if output exceeds target.</string>
+
+    <!-- Conversion & Formats -->
+    <string name="label_output_format">Output Format</string>
+    <string name="format_mp4">MP4 (H.264 / AAC - Universal)</string>
+    <string name="format_mov">MOV (QuickTime)</string>
+    <string name="format_webm">WebM (VP9 / Opus)</string>
+    <string name="format_gif">GIF (Animated Image)</string>
+    <string name="codec_h264">H.264 / AVC (Hardware)</string>
+    <string name="codec_h265">H.265 / HEVC (High Efficiency)</string>
+    <string name="codec_unsupported">Unsupported on this device</string>
+    <string name="codec_hardware_accelerated">Hardware Accelerated</string>
+    <string name="codec_software_fallback">Software Codec</string>
+
+    <!-- Video Editor -->
+    <string name="editor_trim">Trim &amp; Cut</string>
+    <string name="editor_crop">Crop Ratio</string>
+    <string name="editor_rotate">Rotate</string>
+    <string name="editor_speed">Playback Speed</string>
+    <string name="editor_crop_original">Original</string>
+    <string name="editor_crop_16_9">16:9 Landscape</string>
+    <string name="editor_crop_9_16">9:16 Vertical / Reels</string>
+    <string name="editor_crop_1_1">1:1 Square</string>
+    <string name="editor_rotate_90">90° Clockwise</string>
+    <string name="editor_rotate_180">180° Flip</string>
+    <string name="editor_rotate_270">270° Counter-Clockwise</string>
+    <string name="editor_speed_normal">1.0x (Normal)</string>
+    <string name="editor_speed_slow">Slow Motion</string>
+    <string name="editor_speed_fast">Fast Motion</string>
+
+    <!-- Audio Extraction -->
+    <string name="audio_extract_title">Audio Extraction &amp; Compression</string>
+    <string name="audio_format_m4a">M4A / AAC (Lossless Stream Copy)</string>
+    <string name="audio_format_mp3">MP3 (Compatible)</string>
+    <string name="audio_extract_no_reencode">Direct audio demux without video re-encoding</string>
+
+    <!-- Social Media Splitter -->
+    <string name="split_title">Social Media Video Splitter</string>
+    <string name="split_mode_fixed_duration">Fixed Duration Presets</string>
+    <string name="split_mode_equal_parts">Equal Parts</string>
+    <string name="split_mode_max_size">Max File Size</string>
+    <string name="split_mode_custom">Custom Timestamps</string>
+    <string name="split_preset_15s">15s (Instagram Stories)</string>
+    <string name="split_preset_30s">30s (WhatsApp Status)</string>
+    <string name="split_preset_60s">60s (TikTok / YouTube Shorts)</string>
+    <string name="split_engine_fast">Fast Split (Stream Copy)</string>
+    <string name="split_engine_fast_desc">Cuts instantly at nearest keyframes without quality loss. Small boundary drift may occur.</string>
+    <string name="split_engine_precise">Precise Split (Re-encode)</string>
+    <string name="split_engine_precise_desc">Re-encodes frames for exact millisecond cuts. Takes longer.</string>
+    <string name="split_output_naming">Outputs formatted as video_part_001.mp4, video_part_002.mp4</string>
+    <string name="split_partial_safe">Individual segment retry: Successful parts are always preserved if a later cut fails.</string>
+
+    <!-- Thumbnail Studio -->
+    <string name="thumb_title">Thumbnail Studio</string>
+    <string name="thumb_select_frame">Scrub Timeline to Pick Frame</string>
+    <string name="thumb_add_text">Add Text Overlay</string>
+    <string name="thumb_text_hint">Enter title or caption…</string>
+    <string name="thumb_text_outline">Text Outline</string>
+    <string name="thumb_text_shadow">Text Shadow</string>
+    <string name="thumb_filter_brightness">Brightness</string>
+    <string name="thumb_filter_contrast">Contrast</string>
+    <string name="thumb_filter_saturation">Saturation</string>
+    <string name="thumb_ai_assist">AI Assist (Gemini)</string>
+    <string name="thumb_ai_suggest_title">Suggest Catchy Titles</string>
+    <string name="thumb_ai_suggest_colors">Suggest Color Palette</string>
+    <string name="thumb_ai_prompt_refine">Refine Visual Prompt</string>
+    <string name="thumb_export_png">Export PNG</string>
+    <string name="thumb_export_jpg">Export JPEG</string>
+    <string name="thumb_export_webp">Export WebP</string>
+
+    <!-- Processing Queue & Jobs -->
+    <string name="queue_title">Processing Queue</string>
+    <string name="queue_empty">No pending operations in queue</string>
+    <string name="status_queued">Queued</string>
+    <string name="status_processing">Processing…</string>
+    <string name="status_completed">Completed</string>
+    <string name="status_failed">Failed</string>
+    <string name="status_cancelled">Cancelled</string>
+
+    <!-- Output Library -->
+    <string name="library_title">Output Library</string>
+    <string name="library_empty">No exported media yet. Converted videos and extracted audio will appear here.</string>
+    <string name="library_tab_all">All</string>
+    <string name="library_tab_videos">Videos</string>
+    <string name="library_tab_audio">Audio</string>
+    <string name="library_tab_images">Thumbnails</string>
+    <string name="delete_confirm_title">Delete File?</string>
+    <string name="delete_confirm_message">Are you sure you want to delete this generated output? The original source file will remain untouched.</string>
+
+    <!-- Settings & Privacy -->
+    <string name="settings_title">Settings &amp; Device Capabilities</string>
+    <string name="settings_language">Language / زبان</string>
+    <string name="settings_lang_en">English</string>
+    <string name="settings_lang_fa">فارسی (Persian)</string>
+    <string name="settings_theme">Appearance</string>
+    <string name="settings_theme_system">System Default</string>
+    <string name="settings_theme_dark">Dark Mode</string>
+    <string name="settings_theme_light">Light Mode</string>
+    <string name="privacy_guarantee">100% Offline Privacy Guarantee</string>
+    <string name="privacy_desc">All media encoding, compression, and editing happens on your device hardware. Your videos and audio files are never uploaded to any cloud server.</string>
+    <string name="device_hardware_title">Device Hardware Codecs</string>
+
+    <!-- Common Errors & Notifications -->
+    <string name="error_no_media_selected">Please select a media file first</string>
+    <string name="error_invalid_input">Unable to read the selected media file</string>
+    <string name="error_encoder_failed">Hardware encoder error. Try a balanced preset or H.264.</string>
+    <string name="error_low_storage">Insufficient storage space on device</string>
+    <string name="success_export">Successfully saved to Universal Converter folder!</string>
+</resources>
