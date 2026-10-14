@@ -1,113 +1,62 @@
 package com.example.core.ai
 
-import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
+/**
+ * GeminiThumbnailAdvisor: Manages thumbnail title and palette recommendations.
+ *
+ * In accordance with offline-first security guidelines, client-side direct API calls
+ * are disabled in this release to prevent sensitive key packaging or unauthenticated exposure in the APK.
+ * All suggestions provided are high-CTR, built-in offline creative presets that work 100% locally
+ * without uploading frames, videos, or private media metadata.
+ */
 object GeminiThumbnailAdvisor {
 
-    private val client by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build()
-    }
+    // Online cloud AI is disabled in client app until a secure backend proxy is established
+    val isOnlineAiAvailable: Boolean = false
 
-    suspend fun suggestCatchyTitles(topicOrFilename: String, isPersian: Boolean): List<String> = withContext(Dispatchers.IO) {
-        val apiKey = try {
-            val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
-            field.get(null) as? String ?: ""
-        } catch (e: Exception) {
-            ""
-        }
+    suspend fun suggestCatchyTitles(topicOrFilename: String, isPersian: Boolean): List<String> =
+        getThumbnailTitleSuggestions(topicOrFilename, isPersian)
 
-        if (apiKey.isNullOrBlank() || apiKey == "MY_GEMINI_API_KEY") {
-            return@withContext getOfflineTitleSuggestions(isPersian)
-        }
+    suspend fun getThumbnailTitleSuggestions(topicOrFilename: String, isPersian: Boolean): List<String> = withContext(Dispatchers.Default) {
+        val cleanTopic = topicOrFilename.substringBeforeLast(".")
+            .replace(Regex("[_\\-\\d]+"), " ")
+            .trim()
+            .ifEmpty { if (isPersian) "ویدیو" else "Video" }
 
-        val prompt = if (isPersian) {
-            "لطفاً بر اساس این موضوع یا نام ویدیو: '$topicOrFilename'، ۳ عنوان کوتاه، بسیار جذاب و کلیکی برای کاور (تامبنیل) ویدیو به زبان فارسی پیشنهاد بده. فقط عناوین را خط به خط بنویس بدون هیچ متن اضافی."
-        } else {
-            "Based on the video topic or filename '$topicOrFilename', suggest 3 short, catchy, high-CTR YouTube/Instagram thumbnail titles. Output ONLY the 3 titles, one per line, with no extra text or numbers."
-        }
-
-        try {
-            val responseText = callGeminiApi(apiKey, prompt)
-            val lines = responseText.lines()
-                .map { it.trim().removePrefix("-").removePrefix("•").trim() }
-                .filter { it.isNotBlank() }
-            if (lines.isNotEmpty()) lines.take(3) else getOfflineTitleSuggestions(isPersian)
-        } catch (e: Exception) {
-            getOfflineTitleSuggestions(isPersian)
-        }
-    }
-
-    suspend fun suggestColorPalettes(isPersian: Boolean): List<String> = withContext(Dispatchers.IO) {
-        listOf(
-            if (isPersian) "زرد نئونی و مشکی عمیق (جذب نگاه فوق‌العاده)" else "Neon Yellow & Dark Slate (High Contrast)",
-            if (isPersian) "فیروزه‌ای درخشان و بنفش سایبرپانک" else "Electric Cyan & Cyberpunk Violet",
-            if (isPersian) "قرمز پررنگ، سفید و خاکستری متالیک" else "Bold Crimson, White & Metallic Gray",
-            if (isPersian) "نارنجی خورشیدی و سرمه‌ای شیک" else "Sunset Orange & Midnight Navy"
-        )
-    }
-
-    private fun getOfflineTitleSuggestions(isPersian: Boolean): List<String> {
-        return if (isPersian) {
+        if (isPersian) {
             listOf(
-                "این ویدیو را نباید از دست بدهید!",
-                "آموزش و ترفندهای شگفت‌انگیز",
-                "رازهایی که تاکنون نمی‌دانستید"
+                "۵ ترفند مهم درباره $cleanTopic که باید بدانید",
+                "رازهای ناگفته درباره $cleanTopic!",
+                "آموزش کامل و کاربردی $cleanTopic",
+                "نکات طلایی برای موفقیت در $cleanTopic"
             )
         } else {
             listOf(
-                "WATCH THIS BEFORE IT'S TOO LATE!",
-                "The Ultimate Guide You Needed",
-                "Secrets Nobody Told You About"
+                "5 Crucial Facts About $cleanTopic You Must Know",
+                "The Ultimate Practical Guide to $cleanTopic",
+                "Top Mistakes to Avoid with $cleanTopic",
+                "What Nobody Told You About $cleanTopic"
             )
         }
     }
 
-    private fun callGeminiApi(apiKey: String, prompt: String): String {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
-
-        val requestJson = JSONObject().apply {
-            val contents = JSONArray().apply {
-                put(JSONObject().apply {
-                    val parts = JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("text", prompt)
-                        })
-                    }
-                    put("parts", parts)
-                })
-            }
-            put("contents", contents)
-        }
-
-        val request = Request.Builder()
-            .url(url)
-            .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("API error: ${response.code}")
-            }
-            val bodyStr = response.body?.string() ?: ""
-            val json = JSONObject(bodyStr)
-            val candidates = json.optJSONArray("candidates") ?: return ""
-            if (candidates.length() == 0) return ""
-            val content = candidates.getJSONObject(0).optJSONObject("content") ?: return ""
-            val parts = content.optJSONArray("parts") ?: return ""
-            if (parts.length() == 0) return ""
-            return parts.getJSONObject(0).optString("text", "")
+    suspend fun getSuggestedColorPalettes(isPersian: Boolean): List<Pair<String, String>> = withContext(Dispatchers.Default) {
+        if (isPersian) {
+            listOf(
+                "کنتراست بالا (اکشن)" to "زرد نئونی #FFE600 + مشکی خالص #000000",
+                "مدرن و فناوری" to "فیروزه‌ای الکتریک #00E5FF + سرمه‌ای تیره #0A1128",
+                "جذاب و احساسی" to "قرمز آتشی #FF1744 + سفید درخشان #FFFFFF",
+                "شیک و حرفه‌ای" to "نارنجی خورشیدی #FF9100 + خاکستری دودی #1E293B"
+            )
+        } else {
+            listOf(
+                "High Action & Contrast" to "Neon Yellow #FFE600 + Pitch Black #000000",
+                "Modern Tech" to "Electric Cyan #00E5FF + Dark Navy #0A1128",
+                "High Impact" to "Crimson Flame #FF1744 + Pure White #FFFFFF",
+                "Sleek Studio" to "Sunset Orange #FF9100 + Slate Gray #1E293B"
+            )
         }
     }
 }

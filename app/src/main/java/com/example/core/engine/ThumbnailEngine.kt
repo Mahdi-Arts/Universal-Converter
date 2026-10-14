@@ -73,7 +73,7 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
                 finalBitmap.compress(compressFormat, 92, out)
             }
 
-            storageManager.finalizeImageOutput(tempFile, input.name, mime)
+            storageManager.finalizeImageOutput(tempFile, input.name, ext)
         } catch (e: Exception) {
             Result.failure(e)
         } finally {

@@ -161,6 +161,7 @@ data class ProcessingJob(
     val status: JobStatus = JobStatus.QUEUED,
     val progress: Float = 0f, // 0.0 to 1.0
     val originalSizeBytes: Long = 0L,
+    val targetSizeBytes: Long = 0L,
     val outputSizeBytes: Long = 0L,
     val outputPath: String? = null,
     val outputUri: Uri? = null,
@@ -169,6 +170,8 @@ data class ProcessingJob(
     val completedAtMs: Long? = null,
     val currentCodec: String? = null,
     val currentResolution: String? = null,
+    val actualOutputBitrateBps: Long? = null,
+    val targetAchieved: Boolean? = null,
     val retryCount: Int = 0
 ) {
     val compressionSavingsPercent: Int
@@ -187,5 +190,6 @@ data class OutputMediaFile(
     val sizeBytes: Long,
     val durationMs: Long = 0L,
     val dateAddedMs: Long = System.currentTimeMillis(),
-    val type: JobType
+    val type: JobType,
+    val mimeType: String = "video/mp4"
 )

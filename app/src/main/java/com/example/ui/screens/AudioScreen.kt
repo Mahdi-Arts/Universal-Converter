@@ -184,16 +184,23 @@ fun AudioScreen(
                         FilterChip(
                             selected = selectedFormat == "m4a",
                             onClick = { selectedFormat = "m4a" },
-                            label = { Text("M4A / AAC (Lossless Stream)") },
+                            label = { Text("M4A (Lossless Stream Copy)") },
                             modifier = Modifier.weight(1f)
                         )
                         FilterChip(
-                            selected = selectedFormat == "mp3",
-                            onClick = { selectedFormat = "mp3" },
-                            label = { Text("MP3 (Universal)") },
+                            selected = false,
+                            onClick = { },
+                            enabled = false,
+                            label = { Text("MP3 (Next Release)") },
                             modifier = Modifier.weight(1f)
                         )
                     }
+
+                    Text(
+                        text = "• M4A / AAC stream demuxing is active (instant, zero generation loss).\n• Standalone MP3 re-encoding is not yet implemented in this release.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

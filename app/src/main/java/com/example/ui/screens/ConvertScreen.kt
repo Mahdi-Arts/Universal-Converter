@@ -98,7 +98,7 @@ fun ConvertScreen(
                 mimeType = "video/mp4",
                 codecMime = "video/hevc",
                 isSupported = isH265Supported,
-                reasonIfNotSupported = if (!isH265Supported) "No hardware HEVC encoder detected on this device" else null
+                reasonIfNotSupported = if (!isH265Supported) "Unsupported by hardware on this device" else null
             ),
             FormatOption(
                 id = "webm_vp9",
@@ -106,16 +106,26 @@ fun ConvertScreen(
                 subtitle = "Optimized open container for web embedding and Chromium browsers.",
                 mimeType = "video/webm",
                 codecMime = "video/x-vnd.on2.vp9",
-                isSupported = isVp9Supported,
-                reasonIfNotSupported = if (!isVp9Supported) "VP9 encoder unavailable on this hardware" else null
+                isSupported = false,
+                reasonIfNotSupported = "Not yet implemented: WebM native muxer scheduled for next release."
             ),
             FormatOption(
                 id = "mov",
-                title = "MOV (QuickTime)",
+                title = "MOV (Apple QuickTime)",
                 subtitle = "Standard Apple QuickTime container format.",
                 mimeType = "video/quicktime",
                 codecMime = "video/avc",
-                isSupported = true
+                isSupported = false,
+                reasonIfNotSupported = "Not yet implemented: MOV container scheduled for next release."
+            ),
+            FormatOption(
+                id = "gif",
+                title = "GIF (Animated Image)",
+                subtitle = "Short animated sequence without audio.",
+                mimeType = "image/gif",
+                codecMime = "image/gif",
+                isSupported = false,
+                reasonIfNotSupported = "Not yet implemented: GIF encoding pipeline scheduled for next release."
             )
         )
     }

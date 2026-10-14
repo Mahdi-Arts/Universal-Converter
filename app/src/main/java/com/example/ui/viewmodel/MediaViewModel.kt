@@ -19,6 +19,7 @@ import com.example.core.model.MediaItemInfo
 import com.example.core.model.OutputMediaFile
 import com.example.core.model.ProcessingJob
 import com.example.core.model.SplitConfig
+import com.example.core.model.SplitEngine
 import com.example.core.model.ThumbnailConfig
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +28,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 
 class MediaViewModel(application: Application) : AndroidViewModel(application) {
@@ -59,6 +63,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
     val isDarkTheme: StateFlow<Boolean?> = _isDarkTheme.asStateFlow()
 
     private val cancellationTokens = ConcurrentHashMap<String, Boolean>()
+    private val heavyJobMutex = Mutex() // Serialize heavy encoding jobs
 
     init {
         loadDeviceCapabilities()
@@ -105,7 +110,11 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelJob(jobId: String) {
         cancellationTokens[jobId] = true
         _jobs.update { list ->
-            list.map { if (it.id == jobId && it.status == JobStatus.PROCESSING) it.copy(status = JobStatus.CANCELLED) else it }
+            list.map {
+                if (it.id == jobId && (it.status == JobStatus.PROCESSING || it.status == JobStatus.QUEUED)) {
+                    it.copy(status = JobStatus.CANCELLED)
+                } else it
+            }
         }
     }
 
@@ -124,12 +133,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openExportedOutput(file: OutputMediaFile) {
-        storageManager.openFile(file)
+    fun openExportedOutput(file: OutputMediaFile): Result<Unit> {
+        return storageManager.openFile(file)
     }
 
-    fun shareExportedOutput(file: OutputMediaFile) {
-        storageManager.shareFile(file)
+    fun shareExportedOutput(file: OutputMediaFile): Result<Unit> {
+        return storageManager.shareFile(file)
     }
 
     // --- Compression & Conversion ---
@@ -142,25 +151,33 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
             type = JobType.COMPRESSION,
             status = JobStatus.QUEUED,
             originalSizeBytes = input.sizeBytes,
+            targetSizeBytes = if (config.preset == CompressionPreset.TARGET_SIZE) config.targetSizeBytes else 0L,
             currentCodec = config.videoMimeType,
             currentResolution = "${config.resolutionWidth}x${config.resolutionHeight}"
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
-            updateJobStatus(jobId, JobStatus.PROCESSING)
-            cancellationTokens[jobId] = false
+            heavyJobMutex.withLock {
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
+                }
 
-            val result = media3Engine.compressOrConvert(
-                context = getApplication(),
-                input = input,
-                config = config,
-                onProgress = { p -> updateJobProgress(jobId, p) },
-                isCancelled = { cancellationTokens[jobId] == true }
-            )
+                updateJobStatus(jobId, JobStatus.PROCESSING)
 
-            handleJobCompletion(jobId, result)
+                val result = media3Engine.compressOrConvert(
+                    context = getApplication(),
+                    input = input,
+                    config = config,
+                    onProgress = { p -> updateJobProgress(jobId, p) },
+                    isCancelled = { cancellationTokens[jobId] == true }
+                )
+
+                handleJobCompletion(jobId, result)
+            }
         }
     }
 
@@ -181,20 +198,27 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
-            updateJobStatus(jobId, JobStatus.PROCESSING)
-            cancellationTokens[jobId] = false
+            heavyJobMutex.withLock {
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
+                }
 
-            val result = media3Engine.compressOrConvert(
-                context = getApplication(),
-                input = input,
-                config = config,
-                onProgress = { p -> updateJobProgress(jobId, p) },
-                isCancelled = { cancellationTokens[jobId] == true }
-            )
+                updateJobStatus(jobId, JobStatus.PROCESSING)
 
-            handleJobCompletion(jobId, result)
+                val result = media3Engine.compressOrConvert(
+                    context = getApplication(),
+                    input = input,
+                    config = config,
+                    onProgress = { p -> updateJobProgress(jobId, p) },
+                    isCancelled = { cancellationTokens[jobId] == true }
+                )
+
+                handleJobCompletion(jobId, result)
+            }
         }
     }
 
@@ -211,20 +235,27 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
-            updateJobStatus(jobId, JobStatus.PROCESSING)
-            cancellationTokens[jobId] = false
+            heavyJobMutex.withLock {
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
+                }
 
-            val result = media3Engine.editVideo(
-                context = getApplication(),
-                input = input,
-                config = config,
-                onProgress = { p -> updateJobProgress(jobId, p) },
-                isCancelled = { cancellationTokens[jobId] == true }
-            )
+                updateJobStatus(jobId, JobStatus.PROCESSING)
 
-            handleJobCompletion(jobId, result)
+                val result = media3Engine.editVideo(
+                    context = getApplication(),
+                    input = input,
+                    config = config,
+                    onProgress = { p -> updateJobProgress(jobId, p) },
+                    isCancelled = { cancellationTokens[jobId] == true }
+                )
+
+                handleJobCompletion(jobId, result)
+            }
         }
     }
 
@@ -241,21 +272,28 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
-            updateJobStatus(jobId, JobStatus.PROCESSING)
-            cancellationTokens[jobId] = false
+            heavyJobMutex.withLock {
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
+                }
 
-            val result = media3Engine.extractAudio(
-                context = getApplication(),
-                input = input,
-                asMp3 = asMp3,
-                bitrateBps = bitrateBps,
-                onProgress = { p -> updateJobProgress(jobId, p) },
-                isCancelled = { cancellationTokens[jobId] == true }
-            )
+                updateJobStatus(jobId, JobStatus.PROCESSING)
 
-            handleJobCompletion(jobId, result)
+                val result = media3Engine.extractAudio(
+                    context = getApplication(),
+                    input = input,
+                    asMp3 = asMp3,
+                    bitrateBps = bitrateBps,
+                    onProgress = { p -> updateJobProgress(jobId, p) },
+                    isCancelled = { cancellationTokens[jobId] == true }
+                )
+
+                handleJobCompletion(jobId, result)
+            }
         }
     }
 
@@ -272,43 +310,55 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
-            updateJobStatus(jobId, JobStatus.PROCESSING)
-            cancellationTokens[jobId] = false
-
-            val result = media3Engine.splitVideo(
-                context = getApplication(),
-                input = input,
-                config = config,
-                onPartProgress = { part, total, p ->
-                    val overallProgress = ((part - 1) + p) / total.toFloat()
-                    updateJobProgress(jobId, overallProgress.coerceIn(0f, 1f))
-                },
-                isCancelled = { cancellationTokens[jobId] == true }
-            )
-
-            if (result.isSuccess) {
-                val list = result.getOrThrow()
-                val totalOutputBytes = list.sumOf { it.sizeBytes }
-                _jobs.update { currentJobs ->
-                    currentJobs.map {
-                        if (it.id == jobId) {
-                            it.copy(
-                                status = JobStatus.COMPLETED,
-                                progress = 1.0f,
-                                outputSizeBytes = totalOutputBytes,
-                                completedAtMs = System.currentTimeMillis()
-                            )
-                        } else it
-                    }
+            heavyJobMutex.withLock {
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
                 }
-                refreshLibraryOutputs()
-            } else {
-                val error = result.exceptionOrNull()?.localizedMessage ?: "Splitting failed"
-                _jobs.update { currentJobs ->
-                    currentJobs.map {
-                        if (it.id == jobId) it.copy(status = JobStatus.FAILED, errorReason = error) else it
+
+                updateJobStatus(jobId, JobStatus.PROCESSING)
+
+                val result = media3Engine.splitVideo(
+                    context = getApplication(),
+                    input = input,
+                    config = config,
+                    onPartProgress = { part, total, p ->
+                        val overallProgress = ((part - 1) + p) / total.toFloat()
+                        updateJobProgress(jobId, overallProgress.coerceIn(0f, 1f))
+                    },
+                    isCancelled = { cancellationTokens[jobId] == true }
+                )
+
+                if (cancellationTokens[jobId] == true) {
+                    updateJobStatus(jobId, JobStatus.CANCELLED)
+                    return@withLock
+                }
+
+                if (result.isSuccess) {
+                    val list = result.getOrThrow()
+                    val totalOutputBytes = list.sumOf { it.sizeBytes }
+                    _jobs.update { currentJobs ->
+                        currentJobs.map {
+                            if (it.id == jobId) {
+                                it.copy(
+                                    status = JobStatus.COMPLETED,
+                                    progress = 1.0f,
+                                    outputSizeBytes = totalOutputBytes,
+                                    completedAtMs = System.currentTimeMillis()
+                                )
+                            } else it
+                        }
+                    }
+                    refreshLibraryOutputs()
+                } else {
+                    val error = result.exceptionOrNull()?.localizedMessage ?: "Splitting failed"
+                    _jobs.update { currentJobs ->
+                        currentJobs.map {
+                            if (it.id == jobId) it.copy(status = JobStatus.FAILED, errorReason = error) else it
+                        }
                     }
                 }
             }
@@ -328,8 +378,14 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         enqueueJob(job)
+        cancellationTokens[jobId] = false
 
         viewModelScope.launch {
+            if (cancellationTokens[jobId] == true) {
+                updateJobStatus(jobId, JobStatus.CANCELLED)
+                return@launch
+            }
+
             updateJobStatus(jobId, JobStatus.PROCESSING)
             val result = thumbnailEngine.generateThumbnail(getApplication(), input, config)
             handleJobCompletion(jobId, result)
@@ -347,28 +403,52 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateJobStatus(jobId: String, status: JobStatus) {
         _jobs.update { list ->
-            list.map { if (it.id == jobId) it.copy(status = status) else it }
+            list.map {
+                if (it.id == jobId) {
+                    // Critical rule: A cancelled job must never be overwritten as FAILED or COMPLETED
+                    if (it.status == JobStatus.CANCELLED && status != JobStatus.CANCELLED) {
+                        it
+                    } else {
+                        it.copy(status = status)
+                    }
+                } else it
+            }
         }
     }
 
     private fun updateJobProgress(jobId: String, progress: Float) {
         _jobs.update { list ->
-            list.map { if (it.id == jobId) it.copy(progress = progress) else it }
+            list.map {
+                if (it.id == jobId && it.status == JobStatus.PROCESSING) {
+                    it.copy(progress = progress)
+                } else it
+            }
         }
     }
 
     private fun handleJobCompletion(jobId: String, result: Result<OutputMediaFile>) {
+        if (cancellationTokens[jobId] == true) {
+            updateJobStatus(jobId, JobStatus.CANCELLED)
+            return
+        }
+
         if (result.isSuccess) {
             val output = result.getOrThrow()
             _jobs.update { list ->
                 list.map {
                     if (it.id == jobId) {
+                        if (it.status == JobStatus.CANCELLED) return@map it
+                        val targetMet = if (it.targetSizeBytes > 0L) {
+                            output.sizeBytes <= (it.targetSizeBytes * 1.05)
+                        } else null
+
                         it.copy(
                             status = JobStatus.COMPLETED,
                             progress = 1.0f,
                             outputSizeBytes = output.sizeBytes,
                             outputPath = output.path,
                             outputUri = output.uri,
+                            targetAchieved = targetMet,
                             completedAtMs = System.currentTimeMillis()
                         )
                     } else it
@@ -376,10 +456,17 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
             }
             refreshLibraryOutputs()
         } else {
-            val error = result.exceptionOrNull()?.localizedMessage ?: "Operation failed"
-            _jobs.update { list ->
-                list.map {
-                    if (it.id == jobId) it.copy(status = JobStatus.FAILED, errorReason = error) else it
+            val ex = result.exceptionOrNull()
+            if (ex is CancellationException || cancellationTokens[jobId] == true) {
+                updateJobStatus(jobId, JobStatus.CANCELLED)
+            } else {
+                val error = ex?.localizedMessage ?: "Operation failed"
+                _jobs.update { list ->
+                    list.map {
+                        if (it.id == jobId) {
+                            if (it.status == JobStatus.CANCELLED) it else it.copy(status = JobStatus.FAILED, errorReason = error)
+                        } else it
+                    }
                 }
             }
         }
