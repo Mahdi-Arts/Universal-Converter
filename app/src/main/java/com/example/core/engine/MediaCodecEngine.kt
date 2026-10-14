@@ -298,7 +298,9 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
         if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
             flags = flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
         }
-        if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            (sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME) != 0
+        ) {
             flags = flags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
         }
         return flags
