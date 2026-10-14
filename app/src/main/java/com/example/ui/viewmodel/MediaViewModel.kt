@@ -63,6 +63,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
     val isDarkTheme: StateFlow<Boolean?> = _isDarkTheme.asStateFlow()
 
     private val cancellationTokens = ConcurrentHashMap<String, Boolean>()
+    private val activeJobCoroutines = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
     private val heavyJobMutex = Mutex() // Serialize heavy encoding jobs
 
     init {
@@ -109,6 +110,8 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelJob(jobId: String) {
         cancellationTokens[jobId] = true
+        activeJobCoroutines[jobId]?.cancel()
+        activeJobCoroutines.remove(jobId)
         _jobs.update { list ->
             list.map {
                 if (it.id == jobId && (it.status == JobStatus.PROCESSING || it.status == JobStatus.QUEUED)) {
@@ -116,6 +119,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                 } else it
             }
         }
+        refreshLibraryOutputs()
     }
 
     fun clearCompletedJobs() {
@@ -159,10 +163,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             heavyJobMutex.withLock {
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
                     return@withLock
                 }
 
@@ -179,6 +185,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                 handleJobCompletion(jobId, result)
             }
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     fun startFormatConversion(outputMime: String, targetCodec: String) {
@@ -200,10 +207,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             heavyJobMutex.withLock {
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
                     return@withLock
                 }
 
@@ -220,6 +229,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                 handleJobCompletion(jobId, result)
             }
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     // --- Video Editing ---
@@ -237,10 +247,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             heavyJobMutex.withLock {
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
                     return@withLock
                 }
 
@@ -257,6 +269,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                 handleJobCompletion(jobId, result)
             }
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     // --- Audio Extraction ---
@@ -274,10 +287,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             heavyJobMutex.withLock {
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
                     return@withLock
                 }
 
@@ -295,6 +310,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                 handleJobCompletion(jobId, result)
             }
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     // --- Social Splitter ---
@@ -312,10 +328,12 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             heavyJobMutex.withLock {
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
                     return@withLock
                 }
 
@@ -334,6 +352,9 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (cancellationTokens[jobId] == true) {
                     updateJobStatus(jobId, JobStatus.CANCELLED)
+                    cancellationTokens.remove(jobId)
+                    activeJobCoroutines.remove(jobId)
+                    refreshLibraryOutputs()
                     return@withLock
                 }
 
@@ -343,6 +364,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                     _jobs.update { currentJobs ->
                         currentJobs.map {
                             if (it.id == jobId) {
+                                if (it.status == JobStatus.CANCELLED) return@map it
                                 it.copy(
                                     status = JobStatus.COMPLETED,
                                     progress = 1.0f,
@@ -352,17 +374,27 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                             } else it
                         }
                     }
-                    refreshLibraryOutputs()
                 } else {
-                    val error = result.exceptionOrNull()?.localizedMessage ?: "Splitting failed"
-                    _jobs.update { currentJobs ->
-                        currentJobs.map {
-                            if (it.id == jobId) it.copy(status = JobStatus.FAILED, errorReason = error) else it
+                    val ex = result.exceptionOrNull()
+                    if (ex is CancellationException) {
+                        updateJobStatus(jobId, JobStatus.CANCELLED)
+                    } else {
+                        val error = ex?.localizedMessage ?: "Splitting failed"
+                        _jobs.update { currentJobs ->
+                            currentJobs.map {
+                                if (it.id == jobId) {
+                                    if (it.status == JobStatus.CANCELLED) it else it.copy(status = JobStatus.FAILED, errorReason = error)
+                                } else it
+                            }
                         }
                     }
                 }
+                cancellationTokens.remove(jobId)
+                activeJobCoroutines.remove(jobId)
+                refreshLibraryOutputs()
             }
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     // --- Thumbnail Studio ---
@@ -380,16 +412,24 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
         enqueueJob(job)
         cancellationTokens[jobId] = false
 
-        viewModelScope.launch {
+        val coroutineJob = viewModelScope.launch {
             if (cancellationTokens[jobId] == true) {
                 updateJobStatus(jobId, JobStatus.CANCELLED)
+                cancellationTokens.remove(jobId)
+                activeJobCoroutines.remove(jobId)
                 return@launch
             }
 
             updateJobStatus(jobId, JobStatus.PROCESSING)
-            val result = thumbnailEngine.generateThumbnail(getApplication(), input, config)
+            val result = thumbnailEngine.generateThumbnail(
+                context = getApplication(),
+                input = input,
+                config = config,
+                isCancelled = { cancellationTokens[jobId] == true }
+            )
             handleJobCompletion(jobId, result)
         }
+        activeJobCoroutines[jobId] = coroutineJob
     }
 
     suspend fun getPreviewFrame(timestampMs: Long): android.graphics.Bitmap? {
@@ -427,8 +467,13 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun handleJobCompletion(jobId: String, result: Result<OutputMediaFile>) {
-        if (cancellationTokens[jobId] == true) {
+        val wasCancelled = cancellationTokens[jobId] == true
+        activeJobCoroutines.remove(jobId)
+
+        if (wasCancelled) {
             updateJobStatus(jobId, JobStatus.CANCELLED)
+            cancellationTokens.remove(jobId)
+            refreshLibraryOutputs()
             return
         }
 
@@ -454,6 +499,7 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                     } else it
                 }
             }
+            cancellationTokens.remove(jobId)
             refreshLibraryOutputs()
         } else {
             val ex = result.exceptionOrNull()
@@ -469,6 +515,8 @@ class MediaViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+            cancellationTokens.remove(jobId)
+            refreshLibraryOutputs()
         }
     }
 }

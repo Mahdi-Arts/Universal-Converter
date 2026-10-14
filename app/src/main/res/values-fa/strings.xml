@@ -168,4 +168,10 @@
     <string name="error_encoder_failed">خطای انکودر سخت‌افزاری. لطفاً پروفایل متعادل یا کدک H.264 را انتخاب کنید.</string>
     <string name="error_low_storage">فضای ذخیره‌سازی دستگاه کافی نیست</string>
     <string name="success_export">فایل با موفقیت در پوشه Universal Converter ذخیره شد!</string>
+    <string name="error_file_open_failed">امکان باز کردن فایل وجود ندارد. برنامه‌ای مناسب یافت نشد.</string>
+    <string name="error_file_share_failed">امکان اشتراک‌گذاری فایل وجود ندارد.</string>
+    <string name="error_file_delete_failed">حذف فایل خروجی ممکن نشد.</string>
+    <string name="error_output_validation_failed">اعتبارسنجی رسانه ناموفق بود: داده آسیب‌دیده یا هدر نامعتبر است.</string>
+    <string name="error_stream_open_failed">باز کردن جریان ذخیره‌سازی برای نوشتن فایل ناموفق بود.</string>
+    <string name="error_media_store_publish_failed">انتشار فایل در حافظه دستگاه ناموفق بود.</string>
 </resources>

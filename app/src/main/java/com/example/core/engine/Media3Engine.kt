@@ -218,9 +218,10 @@ class Media3Engine(
     override suspend fun generateThumbnail(
         context: Context,
         input: MediaItemInfo,
-        config: ThumbnailConfig
+        config: ThumbnailConfig,
+        isCancelled: () -> Boolean
     ): Result<OutputMediaFile> {
-        return thumbnailEngine.generateThumbnail(context, input, config)
+        return thumbnailEngine.generateThumbnail(context, input, config, isCancelled)
     }
 
     private suspend fun runTransformerJob(
@@ -237,8 +238,37 @@ class Media3Engine(
         outputFile: File,
         onProgress: (Float) -> Unit,
         isCancelled: () -> Boolean
-    ): Result<OutputMediaFile> = withContext(Dispatchers.Main) {
+    ): Result<OutputMediaFile> = withContext(Dispatchers.Main.immediate) {
+        if (isCancelled()) {
+            return@withContext Result.failure(CancellationException("Processing was cancelled before starting"))
+        }
+
         val completionDeferred = CompletableDeferred<Result<OutputMediaFile>>()
+        var transformer: Transformer? = null
+        var progressJob: kotlinx.coroutines.Job? = null
+
+        val listener = object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                val finalSize = outputFile.length()
+                completionDeferred.complete(
+                    Result.success(
+                        OutputMediaFile(
+                            id = outputFile.name,
+                            displayName = outputFile.name,
+                            uri = Uri.fromFile(outputFile),
+                            path = outputFile.absolutePath,
+                            sizeBytes = finalSize,
+                            type = JobType.COMPRESSION,
+                            mimeType = "video/mp4"
+                        )
+                    )
+                )
+            }
+
+            override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                completionDeferred.complete(Result.failure(exportException))
+            }
+        }
 
         try {
             val mediaItemBuilder = MediaItem.Builder().setUri(input.uri)
@@ -260,12 +290,10 @@ class Media3Engine(
 
             val effectsList = mutableListOf<Effect>()
 
-            // Downscale resolution effect if specified and smaller than input (never upscale)
             if (targetWidth > 0 && targetHeight > 0 && (targetWidth < input.width || targetHeight < input.height)) {
                 effectsList.add(Presentation.createForWidthAndHeight(targetWidth, targetHeight, Presentation.LAYOUT_SCALE_TO_FIT))
             }
 
-            // Rotation effect
             if (rotation != 0) {
                 effectsList.add(
                     ScaleAndRotateTransformation.Builder()
@@ -278,7 +306,6 @@ class Media3Engine(
                 editedBuilder.setEffects(Effects(emptyList(), effectsList))
             }
 
-            // Encoder factory with actual bitrate settings
             val encoderSettingsBuilder = VideoEncoderSettings.Builder()
             if (videoBitrateBps > 0) {
                 encoderSettingsBuilder.setBitrate(videoBitrateBps)
@@ -287,62 +314,51 @@ class Media3Engine(
                 .setRequestedVideoEncoderSettings(encoderSettingsBuilder.build())
                 .build()
 
-            val transformer = Transformer.Builder(context)
+            val builtTransformer = Transformer.Builder(context)
                 .setEncoderFactory(encoderFactory)
                 .setVideoMimeType(videoCodecMime)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .addListener(listener)
                 .build()
 
-            transformer.addListener(object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    val finalSize = outputFile.length()
-                    completionDeferred.complete(
-                        Result.success(
-                            OutputMediaFile(
-                                id = outputFile.name,
-                                displayName = outputFile.name,
-                                uri = Uri.fromFile(outputFile),
-                                path = outputFile.absolutePath,
-                                sizeBytes = finalSize,
-                                type = JobType.COMPRESSION,
-                                mimeType = "video/mp4"
-                            )
-                        )
-                    )
-                }
+            transformer = builtTransformer
+            builtTransformer.start(editedBuilder.build(), outputFile.absolutePath)
 
-                override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                    completionDeferred.complete(Result.failure(exportException))
-                }
-            })
-
-            transformer.start(editedBuilder.build(), outputFile.absolutePath)
-
-            CoroutineScope(Dispatchers.Default).launch {
+            // Scoped progress monitoring tied directly to the caller's coroutine
+            progressJob = launch {
                 val progressHolder = ProgressHolder()
                 while (!completionDeferred.isCompleted) {
                     if (isCancelled()) {
-                        withContext(Dispatchers.Main) { transformer.cancel() }
+                        builtTransformer.cancel()
                         completionDeferred.complete(Result.failure(CancellationException("Processing was cancelled")))
                         break
                     }
 
-                    withContext(Dispatchers.Main) {
-                        val state = transformer.getProgress(progressHolder)
-                        if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                            onProgress((progressHolder.progress / 100f).coerceIn(0f, 1f))
-                        }
+                    val state = builtTransformer.getProgress(progressHolder)
+                    if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                        onProgress((progressHolder.progress / 100f).coerceIn(0f, 1f))
                     }
 
-                    delay(120)
+                    delay(100)
                 }
             }
 
+            completionDeferred.await()
+        } catch (e: CancellationException) {
+            Result.failure(e)
         } catch (e: Exception) {
-            completionDeferred.complete(Result.failure(e))
+            Result.failure(e)
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable) {
+                try {
+                    progressJob?.cancel()
+                } catch (_: Exception) {}
+                try {
+                    transformer?.removeListener(listener)
+                    transformer?.cancel()
+                } catch (_: Exception) {}
+            }
         }
-
-        completionDeferred.await()
     }
 
     private fun calculateTargetBitrate(input: MediaItemInfo, config: CompressionConfig): Int {

@@ -168,4 +168,10 @@
     <string name="error_encoder_failed">Hardware encoder error. Try a balanced preset or H.264.</string>
     <string name="error_low_storage">Insufficient storage space on device</string>
     <string name="success_export">Successfully saved to Universal Converter folder!</string>
+    <string name="error_file_open_failed">Could not open the file. No compatible app installed.</string>
+    <string name="error_file_share_failed">Could not share the file.</string>
+    <string name="error_file_delete_failed">Could not delete the file.</string>
+    <string name="error_output_validation_failed">Output media validation failed: corrupt stream or invalid header.</string>
+    <string name="error_stream_open_failed">Failed to open storage stream for output file.</string>
+    <string name="error_media_store_publish_failed">Failed to publish media file to device storage.</string>
 </resources>

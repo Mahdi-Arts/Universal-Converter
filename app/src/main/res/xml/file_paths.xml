@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path name="external_movies" path="Movies/Universal Converter" />
+    <external-files-path name="external_music" path="Music/Universal Converter" />
+    <external-files-path name="external_pictures" path="Pictures/Universal Converter" />
+    <external-files-path name="external_files" path="." />
+    <files-path name="internal_files" path="Universal Converter" />
+    <cache-path name="cache_temp" path="universal_temp" />
+</paths>

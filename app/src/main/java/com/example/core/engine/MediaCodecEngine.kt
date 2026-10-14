@@ -13,6 +13,7 @@ import com.example.core.model.SplitEngine
 import com.example.core.model.SplitMode
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
@@ -65,6 +66,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             val totalDurationUs = input.durationMs * 1000L
 
             while (!isCancelled()) {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 val sampleSize = extractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
 
@@ -83,6 +85,8 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             }
 
             if (isCancelled()) {
+                try { muxer.release() } catch (_: Exception) {}
+                muxer = null
                 tempFile.delete()
                 return@withContext Result.failure(CancellationException("Audio extraction cancelled"))
             }
@@ -99,6 +103,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
                 isCancelled = isCancelled
             )
         } catch (e: Exception) {
+            try { muxer?.release() } catch (_: Exception) {}
             tempFile.delete()
             Result.failure(e)
         } finally {
@@ -171,8 +176,13 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             }
         }
 
-        if (isCancelled() && successfulOutputs.isEmpty()) {
-            return@withContext Result.failure(CancellationException("Splitting cancelled"))
+        if (isCancelled()) {
+            // Previous successful parts are preserved
+            if (successfulOutputs.isEmpty()) {
+                return@withContext Result.failure(CancellationException("Splitting cancelled"))
+            } else {
+                return@withContext Result.success(successfulOutputs)
+            }
         }
 
         if (successfulOutputs.isEmpty() && firstError != null) {
@@ -182,7 +192,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
         Result.success(successfulOutputs)
     }
 
-    private fun extractSegmentStreamCopy(
+    private suspend fun extractSegmentStreamCopy(
         context: Context,
         inputUri: android.net.Uri,
         startUs: Long,
@@ -244,6 +254,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             var initialPtsOffsetUs = -1L
 
             while (!isCancelled()) {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 val trackIndex = extractor.sampleTrackIndex
                 if (trackIndex < 0) break
 

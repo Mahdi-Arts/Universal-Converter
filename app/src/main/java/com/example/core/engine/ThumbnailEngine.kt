@@ -18,66 +18,128 @@ import com.example.core.model.ThumbnailConfig
 import com.example.core.model.ThumbnailFormat
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
+import java.util.concurrent.CancellationException
 
 class ThumbnailEngine(private val storageManager: OutputStorageManager) {
 
     suspend fun generateThumbnail(
         context: Context,
         input: MediaItemInfo,
-        config: ThumbnailConfig
+        config: ThumbnailConfig,
+        isCancelled: () -> Boolean = { false }
     ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
+        if (isCancelled()) {
+            return@withContext Result.failure(CancellationException("Thumbnail generation cancelled before start"))
+        }
+
         val retriever = MediaMetadataRetriever()
+        var tempFile: java.io.File? = null
         try {
             retriever.setDataSource(context, input.uri)
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) throw CancellationException("Cancelled during frame extraction")
+
             val timeUs = (config.frameTimestampMs * 1000L).coerceAtLeast(0L)
             val rawBitmap = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
                 ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: return@withContext Result.failure(IllegalStateException("Could not extract frame from video at ${config.frameTimestampMs}ms"))
 
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                rawBitmap.recycle()
+                throw CancellationException("Cancelled before crop")
+            }
+
             // 1. Crop to ratio if requested
             val cropped = cropBitmap(rawBitmap, config.cropRatio)
+            if (cropped != rawBitmap) {
+                rawBitmap.recycle()
+            }
+
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                cropped.recycle()
+                throw CancellationException("Cancelled before filter")
+            }
 
             // 2. Apply filters (Brightness, Contrast, Saturation)
             val filtered = applyFilters(cropped, config.brightness, config.contrast, config.saturation)
+            if (filtered != cropped) {
+                cropped.recycle()
+            }
+
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                filtered.recycle()
+                throw CancellationException("Cancelled before text overlay")
+            }
 
             // 3. Draw Text Overlay
             val finalBitmap = if (config.textOverlay != null && config.textOverlay.text.isNotBlank()) {
-                drawTextOverlay(filtered, config.textOverlay)
+                val withText = drawTextOverlay(filtered, config.textOverlay)
+                if (withText != filtered) {
+                    filtered.recycle()
+                }
+                withText
             } else {
                 filtered
             }
 
-            // 4. Save to temp file
-            val (ext, mime) = when (config.format) {
-                ThumbnailFormat.PNG -> Pair("png", "image/png")
-                ThumbnailFormat.JPEG -> Pair("jpg", "image/jpeg")
-                ThumbnailFormat.WEBP -> Pair("webp", "image/webp")
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                finalBitmap.recycle()
+                throw CancellationException("Cancelled before image compression")
             }
 
-            val tempFile = storageManager.createTempFile("thumbnail", ext)
-            FileOutputStream(tempFile).use { out ->
-                val compressFormat = when (config.format) {
-                    ThumbnailFormat.PNG -> Bitmap.CompressFormat.PNG
-                    ThumbnailFormat.JPEG -> Bitmap.CompressFormat.JPEG
-                    ThumbnailFormat.WEBP -> {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                            Bitmap.CompressFormat.WEBP_LOSSY
-                        } else {
-                            @Suppress("DEPRECATION")
-                            Bitmap.CompressFormat.WEBP
-                        }
+            // 4. Save to temp file
+            val ext = when (config.format) {
+                ThumbnailFormat.PNG -> "png"
+                ThumbnailFormat.JPEG -> "jpg"
+                ThumbnailFormat.WEBP -> "webp"
+            }
+
+            val temp = storageManager.createTempFile("thumbnail", ext)
+            tempFile = temp
+
+            val compressFormat = when (config.format) {
+                ThumbnailFormat.PNG -> Bitmap.CompressFormat.PNG
+                ThumbnailFormat.JPEG -> Bitmap.CompressFormat.JPEG
+                ThumbnailFormat.WEBP -> {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        Bitmap.CompressFormat.WEBP_LOSSY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        Bitmap.CompressFormat.WEBP
                     }
                 }
+            }
+
+            val compressedSuccessfully = FileOutputStream(temp).use { out ->
                 finalBitmap.compress(compressFormat, 92, out)
             }
 
-            storageManager.finalizeImageOutput(tempFile, input.name, ext)
+            finalBitmap.recycle()
+
+            if (!compressedSuccessfully) {
+                temp.delete()
+                return@withContext Result.failure(IllegalStateException("Bitmap compression returned false for format $ext"))
+            }
+
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                temp.delete()
+                throw CancellationException("Cancelled before finalization")
+            }
+
+            storageManager.finalizeImageOutput(temp, input.name, ext, isCancelled)
         } catch (e: Exception) {
+            tempFile?.let { if (it.exists()) it.delete() }
             Result.failure(e)
         } finally {
-            try { retriever.release() } catch (e: Exception) {}
+            try { retriever.release() } catch (_: Exception) {}
         }
     }
 

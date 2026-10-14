@@ -47,6 +47,7 @@ interface MediaEngine {
     suspend fun generateThumbnail(
         context: Context,
         input: MediaItemInfo,
-        config: ThumbnailConfig
+        config: ThumbnailConfig,
+        isCancelled: () -> Boolean = { false }
     ): Result<OutputMediaFile>
 }

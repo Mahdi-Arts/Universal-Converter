@@ -3,23 +3,194 @@ package com.example.core.storage
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.database.Cursor
+import android.graphics.BitmapFactory
+import android.media.MediaExtractor
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
+import com.example.R
 import com.example.core.model.JobType
 import com.example.core.model.OutputMediaFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.util.concurrent.CancellationException
 
-class OutputStorageManager(private val context: Context) {
+/**
+ * Lifecycle stages for media publication.
+ */
+enum class PublicationStage {
+    PREPARING,
+    COPYING,
+    VALIDATING,
+    PUBLISHING,
+    COMPLETED
+}
 
-    private val folderName = "Universal Converter"
+/**
+ * Storage sink delegate to allow dependency injection and deterministic testing of I/O failures.
+ */
+interface StorageSinkDelegate {
+    fun insertMediaStoreRecord(collection: Uri, values: ContentValues): Uri?
+    fun openOutputStream(uri: Uri): OutputStream?
+    fun updateMediaStoreRecord(uri: Uri, values: ContentValues): Int
+    fun deleteMediaStoreRecord(uri: Uri): Int
+    fun queryMediaStore(
+        uri: Uri,
+        projection: Array<String>?,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        sortOrder: String?
+    ): Cursor?
+}
+
+class DefaultStorageSinkDelegate(private val context: Context) : StorageSinkDelegate {
+    override fun insertMediaStoreRecord(collection: Uri, values: ContentValues): Uri? {
+        return context.contentResolver.insert(collection, values)
+    }
+
+    override fun openOutputStream(uri: Uri): OutputStream? {
+        return context.contentResolver.openOutputStream(uri)
+    }
+
+    override fun updateMediaStoreRecord(uri: Uri, values: ContentValues): Int {
+        return context.contentResolver.update(uri, values, null, null)
+    }
+
+    override fun deleteMediaStoreRecord(uri: Uri): Int {
+        return context.contentResolver.delete(uri, null, null)
+    }
+
+    override fun queryMediaStore(
+        uri: Uri,
+        projection: Array<String>?,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        sortOrder: String?
+    ): Cursor? {
+        return context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)
+    }
+}
+
+/**
+ * Validates generated media structure before publication.
+ */
+interface MediaOutputValidator {
+    fun validate(file: File, jobType: JobType, mimeType: String): Result<Unit>
+}
+
+class DefaultMediaOutputValidator(private val context: Context) : MediaOutputValidator {
+    override fun validate(file: File, jobType: JobType, mimeType: String): Result<Unit> {
+        if (!file.exists() || file.length() <= 0L) {
+            return Result.failure(IllegalStateException("File is missing or has zero size"))
+        }
+
+        return try {
+            when {
+                mimeType.startsWith("image/") || jobType == JobType.THUMBNAIL -> {
+                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(file.absolutePath, options)
+                    if (options.outWidth > 0 && options.outHeight > 0) {
+                        Result.success(Unit)
+                    } else {
+                        Result.failure(IllegalStateException("Invalid image: unable to decode dimensions"))
+                    }
+                }
+                mimeType.startsWith("audio/") || jobType == JobType.AUDIO_EXTRACTION -> {
+                    validateAudio(file)
+                }
+                else -> {
+                    validateVideo(file)
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun validateVideo(file: File): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            val duration = durationStr?.toLongOrNull() ?: 0L
+
+            if (hasVideo == "yes" || duration > 0L) {
+                Result.success(Unit)
+            } else {
+                // Secondary check using MediaExtractor in case retriever returns empty on certain containers
+                validateWithExtractor(file, isVideo = true)
+            }
+        } catch (_: Exception) {
+            validateWithExtractor(file, isVideo = true)
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun validateAudio(file: File): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            val duration = durationStr?.toLongOrNull() ?: 0L
+
+            if (hasAudio == "yes" || duration > 0L) {
+                Result.success(Unit)
+            } else {
+                validateWithExtractor(file, isVideo = false)
+            }
+        } catch (_: Exception) {
+            validateWithExtractor(file, isVideo = false)
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun validateWithExtractor(file: File, isVideo: Boolean): Result<Unit> {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            if (extractor.trackCount <= 0) {
+                return Result.failure(IllegalStateException("No tracks found in media file"))
+            }
+            val prefix = if (isVideo) "video/" else "audio/"
+            var found = false
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith(prefix)) {
+                    found = true
+                    break
+                }
+            }
+            if (found) Result.success(Unit) else Result.failure(IllegalStateException("No valid track found"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+}
+
+class OutputStorageManager(
+    private val context: Context,
+    private val sinkDelegate: StorageSinkDelegate = DefaultStorageSinkDelegate(context),
+    private val mediaValidator: MediaOutputValidator = DefaultMediaOutputValidator(context)
+) {
+    val folderName = "Universal Converter"
 
     fun createTempFile(prefix: String, extension: String): File {
         val tempDir = File(context.cacheDir, "universal_temp").apply {
@@ -35,103 +206,25 @@ class OutputStorageManager(private val context: Context) {
         jobType: JobType = JobType.COMPRESSION,
         containerFormat: String = "mp4",
         isCancelled: () -> Boolean = { false }
-    ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
-        if (isCancelled()) {
-            tempFile.delete()
-            return@withContext Result.failure(CancellationException("Operation cancelled before finalization"))
-        }
-
-        if (!tempFile.exists() || tempFile.length() <= 0L) {
-            tempFile.delete()
-            return@withContext Result.failure(IllegalStateException("Encoded temporary file is missing or empty"))
-        }
-
-        val finalSizeBytes = tempFile.length()
+    ): Result<OutputMediaFile> {
         val extension = if (containerFormat.equals("webm", ignoreCase = true)) "webm" else "mp4"
-        val containerMime = if (extension == "webm") "video/webm" else "video/mp4"
-
-        val targetDisplayName = generateTargetDisplayName(baseName, jobType, extension)
-
-        var insertedUri: Uri? = null
-        val resolver = context.contentResolver
-
-        try {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, targetDisplayName)
-                put(MediaStore.Video.Media.MIME_TYPE, containerMime)
-                put(MediaStore.Video.Media.SIZE, finalSizeBytes)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/$folderName")
-                    put(MediaStore.Video.Media.IS_PENDING, 1)
-                }
-            }
-
-            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val mime = if (extension == "webm") "video/webm" else "video/mp4"
+        val directoryType = Environment.DIRECTORY_MOVIES
+        return executePublicationPipeline(
+            tempFile = tempFile,
+            baseName = baseName,
+            jobType = jobType,
+            extension = extension,
+            mimeType = mime,
+            directoryType = directoryType,
+            mediaTypeUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            qCollectionUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             } else {
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            }
-
-            insertedUri = resolver.insert(collection, contentValues)
-
-            if (insertedUri != null) {
-                // Write to MediaStore
-                resolver.openOutputStream(insertedUri)?.use { outStream ->
-                    FileInputStream(tempFile).use { inStream ->
-                        inStream.copyTo(outStream)
-                    }
-                } ?: throw IllegalStateException("Failed to open MediaStore output stream for $targetDisplayName")
-
-                if (isCancelled()) {
-                    resolver.delete(insertedUri, null, null)
-                    tempFile.delete()
-                    return@withContext Result.failure(CancellationException("Cancelled during output transfer"))
-                }
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val finishValues = ContentValues().apply {
-                        put(MediaStore.Video.Media.IS_PENDING, 0)
-                    }
-                    resolver.update(insertedUri, finishValues, null, null)
-                }
-
-                tempFile.delete()
-
-                Result.success(
-                    OutputMediaFile(
-                        id = insertedUri.toString(),
-                        displayName = targetDisplayName,
-                        uri = insertedUri,
-                        path = insertedUri.toString(),
-                        sizeBytes = finalSizeBytes,
-                        type = jobType,
-                        mimeType = containerMime
-                    )
-                )
-            } else {
-                // Fallback for Android 7-9 or if MediaStore insert returned null
-                val fallbackFile = writeToAppExternalDir(tempFile, Environment.DIRECTORY_MOVIES, targetDisplayName)
-                tempFile.delete()
-                val fileUri = Uri.fromFile(fallbackFile)
-                Result.success(
-                    OutputMediaFile(
-                        id = fileUri.toString(),
-                        displayName = targetDisplayName,
-                        uri = fileUri,
-                        path = fallbackFile.absolutePath,
-                        sizeBytes = finalSizeBytes,
-                        type = jobType,
-                        mimeType = containerMime
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            insertedUri?.let { uri ->
-                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
-            }
-            tempFile.delete()
-            Result.failure(e)
-        }
+            },
+            isCancelled = isCancelled
+        )
     }
 
     suspend fun finalizeAudioOutput(
@@ -140,101 +233,25 @@ class OutputStorageManager(private val context: Context) {
         jobType: JobType = JobType.AUDIO_EXTRACTION,
         audioFormat: String = "m4a",
         isCancelled: () -> Boolean = { false }
-    ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
-        if (isCancelled()) {
-            tempFile.delete()
-            return@withContext Result.failure(CancellationException("Operation cancelled before finalization"))
-        }
-
-        if (!tempFile.exists() || tempFile.length() <= 0L) {
-            tempFile.delete()
-            return@withContext Result.failure(IllegalStateException("Extracted audio temp file is missing or empty"))
-        }
-
-        val finalSizeBytes = tempFile.length()
+    ): Result<OutputMediaFile> {
         val extension = if (audioFormat.equals("mp3", ignoreCase = true)) "mp3" else "m4a"
-        val containerMime = if (extension == "mp3") "audio/mpeg" else "audio/mp4"
-
-        val targetDisplayName = generateTargetDisplayName(baseName, jobType, extension)
-
-        var insertedUri: Uri? = null
-        val resolver = context.contentResolver
-
-        try {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Audio.Media.DISPLAY_NAME, targetDisplayName)
-                put(MediaStore.Audio.Media.MIME_TYPE, containerMime)
-                put(MediaStore.Audio.Media.SIZE, finalSizeBytes)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/$folderName")
-                    put(MediaStore.Audio.Media.IS_PENDING, 1)
-                }
-            }
-
-            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val mime = if (extension == "mp3") "audio/mpeg" else "audio/mp4"
+        val directoryType = Environment.DIRECTORY_MUSIC
+        return executePublicationPipeline(
+            tempFile = tempFile,
+            baseName = baseName,
+            jobType = jobType,
+            extension = extension,
+            mimeType = mime,
+            directoryType = directoryType,
+            mediaTypeUri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            qCollectionUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             } else {
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-            }
-
-            insertedUri = resolver.insert(collection, contentValues)
-
-            if (insertedUri != null) {
-                resolver.openOutputStream(insertedUri)?.use { outStream ->
-                    FileInputStream(tempFile).use { inStream ->
-                        inStream.copyTo(outStream)
-                    }
-                } ?: throw IllegalStateException("Failed to open MediaStore audio stream")
-
-                if (isCancelled()) {
-                    resolver.delete(insertedUri, null, null)
-                    tempFile.delete()
-                    return@withContext Result.failure(CancellationException("Cancelled during audio transfer"))
-                }
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val finishValues = ContentValues().apply {
-                        put(MediaStore.Audio.Media.IS_PENDING, 0)
-                    }
-                    resolver.update(insertedUri, finishValues, null, null)
-                }
-
-                tempFile.delete()
-
-                Result.success(
-                    OutputMediaFile(
-                        id = insertedUri.toString(),
-                        displayName = targetDisplayName,
-                        uri = insertedUri,
-                        path = insertedUri.toString(),
-                        sizeBytes = finalSizeBytes,
-                        type = jobType,
-                        mimeType = containerMime
-                    )
-                )
-            } else {
-                val fallbackFile = writeToAppExternalDir(tempFile, Environment.DIRECTORY_MUSIC, targetDisplayName)
-                tempFile.delete()
-                val fileUri = Uri.fromFile(fallbackFile)
-                Result.success(
-                    OutputMediaFile(
-                        id = fileUri.toString(),
-                        displayName = targetDisplayName,
-                        uri = fileUri,
-                        path = fallbackFile.absolutePath,
-                        sizeBytes = finalSizeBytes,
-                        type = jobType,
-                        mimeType = containerMime
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            insertedUri?.let { uri ->
-                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
-            }
-            tempFile.delete()
-            Result.failure(e)
-        }
+            },
+            isCancelled = isCancelled
+        )
     }
 
     suspend fun finalizeImageOutput(
@@ -242,109 +259,268 @@ class OutputStorageManager(private val context: Context) {
         baseName: String,
         imageFormat: String = "png",
         isCancelled: () -> Boolean = { false }
-    ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
-        if (isCancelled()) {
-            tempFile.delete()
-            return@withContext Result.failure(CancellationException("Operation cancelled before finalization"))
-        }
-
-        if (!tempFile.exists() || tempFile.length() <= 0L) {
-            tempFile.delete()
-            return@withContext Result.failure(IllegalStateException("Thumbnail file is missing or empty"))
-        }
-
-        val finalSizeBytes = tempFile.length()
+    ): Result<OutputMediaFile> {
         val extension = when (imageFormat.lowercase()) {
             "webp" -> "webp"
             "jpeg", "jpg" -> "jpg"
             else -> "png"
         }
-        val containerMime = when (extension) {
+        val mime = when (extension) {
             "webp" -> "image/webp"
             "jpg" -> "image/jpeg"
             else -> "image/png"
         }
-
-        val targetDisplayName = generateTargetDisplayName(baseName, JobType.THUMBNAIL, extension)
-
-        var insertedUri: Uri? = null
-        val resolver = context.contentResolver
-
-        try {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, targetDisplayName)
-                put(MediaStore.Images.Media.MIME_TYPE, containerMime)
-                put(MediaStore.Images.Media.SIZE, finalSizeBytes)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$folderName")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                }
-            }
-
-            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val directoryType = Environment.DIRECTORY_PICTURES
+        return executePublicationPipeline(
+            tempFile = tempFile,
+            baseName = baseName,
+            jobType = JobType.THUMBNAIL,
+            extension = extension,
+            mimeType = mime,
+            directoryType = directoryType,
+            mediaTypeUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            qCollectionUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             } else {
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            },
+            isCancelled = isCancelled
+        )
+    }
+
+    /**
+     * Unified, robust publication pipeline across Video, Audio, and Image:
+     * PREPARING -> COPYING -> VALIDATING -> PUBLISHING -> COMPLETED
+     */
+    private suspend fun executePublicationPipeline(
+        tempFile: File,
+        baseName: String,
+        jobType: JobType,
+        extension: String,
+        mimeType: String,
+        directoryType: String,
+        mediaTypeUri: Uri,
+        qCollectionUri: Uri,
+        isCancelled: () -> Boolean
+    ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
+        var stage = PublicationStage.PREPARING
+        var insertedMediaStoreUri: Uri? = null
+        var stagingAppSpecificFile: File? = null
+        var isPublishedSuccessfully = false
+
+        try {
+            // Stage 1: PREPARING
+            currentCoroutineContext().ensureActive()
+            if (isCancelled()) {
+                throw CancellationException("Operation cancelled before publication")
             }
 
-            insertedUri = resolver.insert(collection, contentValues)
+            if (!tempFile.exists() || tempFile.length() <= 0L) {
+                throw IllegalStateException("Temporary media file is missing or zero-length")
+            }
 
-            if (insertedUri != null) {
-                resolver.openOutputStream(insertedUri)?.use { outStream ->
-                    FileInputStream(tempFile).use { inStream ->
-                        inStream.copyTo(outStream)
-                    }
-                } ?: throw IllegalStateException("Failed to open MediaStore image stream")
+            val sourceSizeBytes = tempFile.length()
+            val targetDisplayName = generateTargetDisplayName(baseName, jobType, extension)
 
+            val useMediaStore = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+            if (useMediaStore) {
+                // MediaStore (Android 10+)
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, targetDisplayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.SIZE, sourceSizeBytes)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$directoryType/$folderName")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+
+                val inserted = sinkDelegate.insertMediaStoreRecord(qCollectionUri, contentValues)
+                    ?: throw IllegalStateException("MediaStore insert returned null for $targetDisplayName")
+                insertedMediaStoreUri = inserted
+
+                // Stage 2: COPYING
+                stage = PublicationStage.COPYING
+                val outStream = sinkDelegate.openOutputStream(inserted)
+                    ?: throw IllegalStateException("Failed to open MediaStore output stream for $targetDisplayName")
+
+                copyBoundedWithCancellation(tempFile, outStream, isCancelled)
+
+                // Stage 3: VALIDATING
+                stage = PublicationStage.VALIDATING
+                currentCoroutineContext().ensureActive()
                 if (isCancelled()) {
-                    resolver.delete(insertedUri, null, null)
-                    tempFile.delete()
-                    return@withContext Result.failure(CancellationException("Cancelled during image transfer"))
+                    throw CancellationException("Cancelled during validation stage")
                 }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val finishValues = ContentValues().apply {
-                        put(MediaStore.Images.Media.IS_PENDING, 0)
-                    }
-                    resolver.update(insertedUri, finishValues, null, null)
+                val valResult = mediaValidator.validate(tempFile, jobType, mimeType)
+                if (valResult.isFailure) {
+                    throw IllegalStateException("Media validation failed: ${valResult.exceptionOrNull()?.message}")
                 }
 
-                tempFile.delete()
+                // Stage 4: PUBLISHING
+                stage = PublicationStage.PUBLISHING
+                currentCoroutineContext().ensureActive()
+                if (isCancelled()) {
+                    throw CancellationException("Cancelled before final publish")
+                }
+
+                val finishValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                val updatedRows = sinkDelegate.updateMediaStoreRecord(inserted, finishValues)
+                if (updatedRows <= 0) {
+                    throw IllegalStateException("Failed to publish media: MediaStore update returned 0 rows")
+                }
+
+                isPublishedSuccessfully = true
+                stage = PublicationStage.COMPLETED
 
                 Result.success(
                     OutputMediaFile(
-                        id = insertedUri.toString(),
+                        id = inserted.toString(),
                         displayName = targetDisplayName,
-                        uri = insertedUri,
-                        path = insertedUri.toString(),
-                        sizeBytes = finalSizeBytes,
-                        type = JobType.THUMBNAIL,
-                        mimeType = containerMime
+                        uri = inserted,
+                        path = inserted.toString(),
+                        sizeBytes = sourceSizeBytes,
+                        type = jobType,
+                        mimeType = mimeType
                     )
                 )
             } else {
-                val fallbackFile = writeToAppExternalDir(tempFile, Environment.DIRECTORY_PICTURES, targetDisplayName)
-                tempFile.delete()
-                val fileUri = Uri.fromFile(fallbackFile)
+                // App-Specific Storage with FileProvider (Android 7-9 or fallback)
+                val targetDir = getAppSpecificDirectory(directoryType)
+                val finalFile = generateUniqueAppSpecificFile(targetDir, targetDisplayName)
+                val stagingFile = File(targetDir, "${finalFile.name}.staging_${System.currentTimeMillis()}")
+                stagingAppSpecificFile = stagingFile
+
+                // Stage 2: COPYING
+                stage = PublicationStage.COPYING
+                val outStream = FileOutputStream(stagingFile)
+                copyBoundedWithCancellation(tempFile, outStream, isCancelled)
+
+                // Stage 3: VALIDATING
+                stage = PublicationStage.VALIDATING
+                currentCoroutineContext().ensureActive()
+                if (isCancelled()) {
+                    throw CancellationException("Cancelled during validation stage")
+                }
+
+                val valResult = mediaValidator.validate(stagingFile, jobType, mimeType)
+                if (valResult.isFailure) {
+                    throw IllegalStateException("Media validation failed: ${valResult.exceptionOrNull()?.message}")
+                }
+
+                // Stage 4: PUBLISHING
+                stage = PublicationStage.PUBLISHING
+                currentCoroutineContext().ensureActive()
+                if (isCancelled()) {
+                    throw CancellationException("Cancelled before atomic rename")
+                }
+
+                if (!stagingFile.renameTo(finalFile)) {
+                    throw IllegalStateException("Failed to finalize output file: atomic rename failed")
+                }
+
+                val contentUri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    finalFile
+                )
+
+                isPublishedSuccessfully = true
+                stage = PublicationStage.COMPLETED
+
                 Result.success(
                     OutputMediaFile(
-                        id = fileUri.toString(),
-                        displayName = targetDisplayName,
-                        uri = fileUri,
-                        path = fallbackFile.absolutePath,
-                        sizeBytes = finalSizeBytes,
-                        type = JobType.THUMBNAIL,
-                        mimeType = containerMime
+                        id = contentUri.toString(),
+                        displayName = finalFile.name,
+                        uri = contentUri,
+                        path = finalFile.absolutePath,
+                        sizeBytes = sourceSizeBytes,
+                        type = jobType,
+                        mimeType = mimeType
                     )
                 )
             }
         } catch (e: Exception) {
-            insertedUri?.let { uri ->
-                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
-            }
-            tempFile.delete()
             Result.failure(e)
+        } finally {
+            withContext(NonCancellable) {
+                // If publication was not completed successfully, rollback and cleanup partial destinations
+                if (!isPublishedSuccessfully) {
+                    insertedMediaStoreUri?.let { uri ->
+                        try {
+                            sinkDelegate.deleteMediaStoreRecord(uri)
+                        } catch (_: Exception) {}
+                    }
+                    stagingAppSpecificFile?.let { staging ->
+                        try {
+                            if (staging.exists()) staging.delete()
+                        } catch (_: Exception) {}
+                    }
+                }
+                // Temp file is always safely removed once reader/writer is finished
+                try {
+                    if (tempFile.exists()) tempFile.delete()
+                } catch (_: Exception) {}
+            }
         }
+    }
+
+    private suspend fun copyBoundedWithCancellation(
+        sourceFile: File,
+        outputStream: OutputStream,
+        isCancelled: () -> Boolean
+    ) {
+        val buffer = ByteArray(64 * 1024)
+        var totalBytesWritten = 0L
+        val expectedLength = sourceFile.length()
+
+        FileInputStream(sourceFile).use { inStream ->
+            outputStream.use { outStream ->
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    if (isCancelled()) {
+                        throw CancellationException("Cancelled during output transfer")
+                    }
+                    val read = inStream.read(buffer)
+                    if (read == -1) break
+                    outStream.write(buffer, 0, read)
+                    totalBytesWritten += read
+                }
+                outStream.flush()
+            }
+        }
+
+        if (totalBytesWritten != expectedLength) {
+            throw IllegalStateException("Destination size mismatch: wrote $totalBytesWritten bytes, expected $expectedLength bytes")
+        }
+    }
+
+    internal fun getAppSpecificDirectory(directoryType: String): File {
+        val external = context.getExternalFilesDir(directoryType)
+        val base = if (external != null && (external.canWrite() || external.mkdirs())) {
+            external
+        } else {
+            File(context.filesDir, directoryType)
+        }
+        val appFolder = File(base, folderName)
+        if (!appFolder.exists()) appFolder.mkdirs()
+        return appFolder
+    }
+
+    internal fun generateUniqueAppSpecificFile(targetDir: File, baseDisplayName: String): File {
+        val nameWithoutExt = baseDisplayName.substringBeforeLast(".")
+        val ext = baseDisplayName.substringAfterLast(".", "")
+        val dotExt = if (ext.isNotEmpty()) ".$ext" else ""
+
+        var candidate = File(targetDir, baseDisplayName)
+        var counter = 1
+        while (candidate.exists()) {
+            candidate = File(targetDir, "${nameWithoutExt}_$counter$dotExt")
+            counter++
+        }
+        return candidate
     }
 
     internal fun generateTargetDisplayName(baseName: String, jobType: JobType, extension: String): String {
@@ -359,79 +535,152 @@ class OutputStorageManager(private val context: Context) {
         }
     }
 
-    private fun writeToAppExternalDir(sourceTemp: File, directoryType: String, displayName: String): File {
-        val targetDir = File(context.getExternalFilesDir(directoryType), folderName).apply {
-            if (!exists()) mkdirs()
-        }
-        val destFile = File(targetDir, displayName)
-        FileInputStream(sourceTemp).use { input ->
-            FileOutputStream(destFile).use { output ->
-                input.copyTo(output)
-            }
-        }
-        return destFile
-    }
-
     suspend fun listExportedOutputs(): List<OutputMediaFile> = withContext(Dispatchers.IO) {
         val list = mutableListOf<OutputMediaFile>()
-        val resolver = context.contentResolver
+        val seenIds = mutableSetOf<String>()
 
-        // 1. Query Videos
+        // 1. MediaStore query (Android 10+ with strict folder filter, or legacy with strict folder matching)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            queryMediaStoreCategory(
+                uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                isVideo = true,
+                isAudio = false,
+                isImage = false,
+                list = list,
+                seenIds = seenIds
+            )
+            queryMediaStoreCategory(
+                uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                isVideo = false,
+                isAudio = true,
+                isImage = false,
+                list = list,
+                seenIds = seenIds
+            )
+            queryMediaStoreCategory(
+                uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                isVideo = false,
+                isAudio = false,
+                isImage = true,
+                list = list,
+                seenIds = seenIds
+            )
+        }
+
+        // 2. Query App-Specific Storage (covers Android 7-9, fallback, and app-specific files)
+        val directories = listOf(
+            Environment.DIRECTORY_MOVIES,
+            Environment.DIRECTORY_MUSIC,
+            Environment.DIRECTORY_PICTURES
+        )
+        for (dirType in directories) {
+            scanAppSpecificFolder(dirType, list, seenIds)
+        }
+
+        list.sortedByDescending { it.dateAddedMs }
+    }
+
+    private fun queryMediaStoreCategory(
+        uri: Uri,
+        isVideo: Boolean,
+        isAudio: Boolean,
+        isImage: Boolean,
+        list: MutableList<OutputMediaFile>,
+        seenIds: MutableSet<String>
+    ) {
         try {
             val projection = arrayOf(
-                MediaStore.Video.Media._ID,
-                MediaStore.Video.Media.DISPLAY_NAME,
-                MediaStore.Video.Media.SIZE,
-                MediaStore.Video.Media.DATE_ADDED,
-                MediaStore.Video.Media.DURATION,
-                MediaStore.Video.Media.MIME_TYPE
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.SIZE,
+                MediaStore.MediaColumns.DATE_ADDED,
+                MediaStore.MediaColumns.MIME_TYPE
             )
-            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?"
-            } else null
-            val selectionArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                arrayOf("%$folderName%")
-            } else null
+            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+            val selectionArgs = arrayOf("%$folderName%")
 
-            resolver.query(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            sinkDelegate.queryMediaStore(
+                uri,
                 projection,
                 selection,
                 selectionArgs,
-                "${MediaStore.Video.Media.DATE_ADDED} DESC"
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC"
             )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
-                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
-                val durCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
-                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
 
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idCol)
-                    val name = cursor.getString(nameCol) ?: "Video"
+                    val name = cursor.getString(nameCol) ?: "Media"
                     val size = cursor.getLong(sizeCol)
                     val date = cursor.getLong(dateCol) * 1000
-                    val duration = cursor.getLong(durCol)
-                    val mime = cursor.getString(mimeCol) ?: "video/mp4"
-                    val contentUri = Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id.toString())
+                    val mime = cursor.getString(mimeCol) ?: if (isVideo) "video/mp4" else if (isAudio) "audio/mp4" else "image/png"
+                    val contentUri = Uri.withAppendedPath(uri, id.toString())
+                    val idKey = contentUri.toString()
 
-                    val jobType = when {
-                        name.contains("_part_") -> JobType.SPLITTING
-                        name.contains("_edited") -> JobType.EDITING
-                        name.contains("_converted") -> JobType.CONVERSION
-                        else -> JobType.COMPRESSION
+                    if (seenIds.add(idKey)) {
+                        val jobType = inferJobType(name, isVideo, isAudio, isImage)
+                        list.add(
+                            OutputMediaFile(
+                                id = idKey,
+                                displayName = name,
+                                uri = contentUri,
+                                path = idKey,
+                                sizeBytes = size,
+                                durationMs = 0L,
+                                dateAddedMs = date,
+                                type = jobType,
+                                mimeType = mime
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun scanAppSpecificFolder(
+        directoryType: String,
+        list: MutableList<OutputMediaFile>,
+        seenIds: MutableSet<String>
+    ) {
+        try {
+            val targetDir = getAppSpecificDirectory(directoryType)
+            val files = targetDir.listFiles() ?: return
+
+            for (file in files) {
+                if (!file.isFile || file.name.contains(".staging_") || file.length() <= 0L) continue
+
+                val contentUri = try {
+                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                } catch (_: Exception) {
+                    continue
+                }
+
+                val idKey = contentUri.toString()
+                if (seenIds.add(idKey)) {
+                    val isVideo = directoryType == Environment.DIRECTORY_MOVIES
+                    val isAudio = directoryType == Environment.DIRECTORY_MUSIC
+                    val isImage = directoryType == Environment.DIRECTORY_PICTURES
+                    val jobType = inferJobType(file.name, isVideo, isAudio, isImage)
+                    val mime = when {
+                        isVideo -> if (file.name.endsWith(".webm", ignoreCase = true)) "video/webm" else "video/mp4"
+                        isAudio -> if (file.name.endsWith(".mp3", ignoreCase = true)) "audio/mpeg" else "audio/mp4"
+                        else -> if (file.name.endsWith(".webp", ignoreCase = true)) "image/webp" else if (file.name.endsWith(".jpg", ignoreCase = true) || file.name.endsWith(".jpeg", ignoreCase = true)) "image/jpeg" else "image/png"
                     }
 
                     list.add(
                         OutputMediaFile(
-                            id = id.toString(),
-                            displayName = name,
+                            id = idKey,
+                            displayName = file.name,
                             uri = contentUri,
-                            path = contentUri.toString(),
-                            sizeBytes = size,
-                            durationMs = duration,
-                            dateAddedMs = date,
+                            path = file.absolutePath,
+                            sizeBytes = file.length(),
+                            durationMs = 0L,
+                            dateAddedMs = file.lastModified(),
                             type = jobType,
                             mimeType = mime
                         )
@@ -439,134 +688,54 @@ class OutputStorageManager(private val context: Context) {
                 }
             }
         } catch (_: Exception) {}
+    }
 
-        // 2. Query Audio
-        try {
-            val projection = arrayOf(
-                MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DISPLAY_NAME,
-                MediaStore.Audio.Media.SIZE,
-                MediaStore.Audio.Media.DATE_ADDED,
-                MediaStore.Audio.Media.DURATION,
-                MediaStore.Audio.Media.MIME_TYPE
-            )
-            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
-            } else null
-            val selectionArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                arrayOf("%$folderName%")
-            } else null
-
-            resolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                "${MediaStore.Audio.Media.DATE_ADDED} DESC"
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
-                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
-                val durCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
-
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idCol)
-                    val name = cursor.getString(nameCol) ?: "Audio"
-                    val size = cursor.getLong(sizeCol)
-                    val date = cursor.getLong(dateCol) * 1000
-                    val duration = cursor.getLong(durCol)
-                    val mime = cursor.getString(mimeCol) ?: "audio/mp4"
-                    val contentUri = Uri.withAppendedPath(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id.toString())
-
-                    list.add(
-                        OutputMediaFile(
-                            id = id.toString(),
-                            displayName = name,
-                            uri = contentUri,
-                            path = contentUri.toString(),
-                            sizeBytes = size,
-                            durationMs = duration,
-                            dateAddedMs = date,
-                            type = JobType.AUDIO_EXTRACTION,
-                            mimeType = mime
-                        )
-                    )
-                }
-            }
-        } catch (_: Exception) {}
-
-        // 3. Query Images (Thumbnails)
-        try {
-            val projection = arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.SIZE,
-                MediaStore.Images.Media.DATE_ADDED,
-                MediaStore.Images.Media.MIME_TYPE
-            )
-            val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-            } else null
-            val selectionArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                arrayOf("%$folderName%")
-            } else null
-
-            resolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                "${MediaStore.Images.Media.DATE_ADDED} DESC"
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
-                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
-                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
-
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idCol)
-                    val name = cursor.getString(nameCol) ?: "Thumbnail"
-                    val size = cursor.getLong(sizeCol)
-                    val date = cursor.getLong(dateCol) * 1000
-                    val mime = cursor.getString(mimeCol) ?: "image/png"
-                    val contentUri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
-
-                    list.add(
-                        OutputMediaFile(
-                            id = id.toString(),
-                            displayName = name,
-                            uri = contentUri,
-                            path = contentUri.toString(),
-                            sizeBytes = size,
-                            durationMs = 0L,
-                            dateAddedMs = date,
-                            type = JobType.THUMBNAIL,
-                            mimeType = mime
-                        )
-                    )
-                }
-            }
-        } catch (_: Exception) {}
-
-        list.sortedByDescending { it.dateAddedMs }
+    private fun inferJobType(name: String, isVideo: Boolean, isAudio: Boolean, isImage: Boolean): JobType {
+        return when {
+            isImage -> JobType.THUMBNAIL
+            isAudio -> JobType.AUDIO_EXTRACTION
+            name.contains("_part_") -> JobType.SPLITTING
+            name.contains("_edited") -> JobType.EDITING
+            name.contains("_converted") -> JobType.CONVERSION
+            else -> JobType.COMPRESSION
+        }
     }
 
     suspend fun deleteExportedFile(outputFile: OutputMediaFile): Boolean = withContext(Dispatchers.IO) {
         try {
-            val rows = context.contentResolver.delete(outputFile.uri, null, null)
+            val uri = outputFile.uri
+            // 1. If content URI belongs to our FileProvider
+            if (uri.authority == "${context.packageName}.fileprovider") {
+                val f = File(outputFile.path)
+                if (f.exists() && isAppOwnedFile(f)) {
+                    return@withContext f.delete()
+                }
+            }
+
+            // 2. Try deleting via ContentResolver
+            val rows = sinkDelegate.deleteMediaStoreRecord(uri)
             if (rows > 0) return@withContext true
-            // If file:// URI fallback
-            if (outputFile.uri.scheme == "file") {
-                val f = File(outputFile.uri.path ?: "")
-                if (f.exists()) return@withContext f.delete()
+
+            // 3. Fallback to physical file deletion if file is within app-owned folders
+            val f = File(outputFile.path)
+            if (f.exists() && isAppOwnedFile(f)) {
+                return@withContext f.delete()
             }
             false
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun isAppOwnedFile(file: File): Boolean {
+        val path = file.canonicalPath
+        val externalFiles = context.getExternalFilesDir(null)?.canonicalPath
+        val internalFiles = context.filesDir.canonicalPath
+        val cacheFiles = context.cacheDir.canonicalPath
+
+        return (externalFiles != null && path.startsWith(externalFiles)) ||
+                path.startsWith(internalFiles) ||
+                path.startsWith(cacheFiles)
     }
 
     fun openFile(outputFile: OutputMediaFile): Result<Unit> {
@@ -591,7 +760,7 @@ class OutputStorageManager(private val context: Context) {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            val chooser = Intent.createChooser(intent, "Share media").apply {
+            val chooser = Intent.createChooser(intent, context.getString(R.string.action_share)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)
