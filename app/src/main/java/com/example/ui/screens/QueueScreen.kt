@@ -19,12 +19,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -60,19 +60,21 @@ fun QueueScreen(
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .testTag("queue_screen"),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .testTag("queue_screen_list"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
                     Text(
-                        text = stringResource(id = R.string.queue_title),
+                        text = stringResource(id = R.string.nav_queue),
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -119,9 +121,8 @@ fun QueueScreen(
                 ProcessingJobCard(
                     job = job,
                     onCancel = { viewModel.cancelJob(job.id) },
-                    onOpen = {
-                        // Open if outputUri exists
-                    }
+                    onOpen = { viewModel.openJobOutput(job) },
+                    onShare = { viewModel.shareJobOutput(job) }
                 )
             }
         }
@@ -132,7 +133,8 @@ fun QueueScreen(
 fun ProcessingJobCard(
     job: ProcessingJob,
     onCancel: () -> Unit,
-    onOpen: () -> Unit
+    onOpen: () -> Unit,
+    onShare: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -181,7 +183,7 @@ fun ProcessingJobCard(
                     )
                 }
 
-                if (job.status == JobStatus.PROCESSING) {
+                if (job.status == JobStatus.PROCESSING || job.status == JobStatus.QUEUED) {
                     IconButton(onClick = onCancel, modifier = Modifier.testTag("cancel_job_button")) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "Cancel", tint = StatusError)
                     }
@@ -229,6 +231,35 @@ fun ProcessingJobCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = StatusError
                 )
+            }
+
+            // Open & Share actions for completed jobs with real output
+            if (job.status == JobStatus.COMPLETED && job.outputUri != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilledTonalButton(
+                        onClick = onOpen,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(stringResource(id = R.string.action_open), style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = onShare,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(stringResource(id = R.string.action_share), style = MaterialTheme.typography.labelMedium)
+                    }
+                }
             }
         }
     }

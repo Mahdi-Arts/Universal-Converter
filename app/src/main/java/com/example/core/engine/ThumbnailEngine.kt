@@ -18,8 +18,11 @@ import com.example.core.model.ThumbnailConfig
 import com.example.core.model.ThumbnailFormat
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CancellationException
 
@@ -36,10 +39,13 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
         }
 
         val retriever = MediaMetadataRetriever()
-        var tempFile: java.io.File? = null
+        var tempFile: File? = null
+        val intermediateBitmaps = mutableListOf<Bitmap>()
+        var isPublishedSuccessfully = false
+
         try {
             retriever.setDataSource(context, input.uri)
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) throw CancellationException("Cancelled during frame extraction")
 
             val timeUs = (config.frameTimestampMs * 1000L).coerceAtLeast(0L)
@@ -47,50 +53,48 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
                 ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: return@withContext Result.failure(IllegalStateException("Could not extract frame from video at ${config.frameTimestampMs}ms"))
 
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            intermediateBitmaps.add(rawBitmap)
+
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) {
-                rawBitmap.recycle()
                 throw CancellationException("Cancelled before crop")
             }
 
             // 1. Crop to ratio if requested
             val cropped = cropBitmap(rawBitmap, config.cropRatio)
             if (cropped != rawBitmap) {
-                rawBitmap.recycle()
+                intermediateBitmaps.add(cropped)
             }
 
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) {
-                cropped.recycle()
                 throw CancellationException("Cancelled before filter")
             }
 
             // 2. Apply filters (Brightness, Contrast, Saturation)
             val filtered = applyFilters(cropped, config.brightness, config.contrast, config.saturation)
-            if (filtered != cropped) {
-                cropped.recycle()
+            if (filtered != cropped && filtered != rawBitmap) {
+                intermediateBitmaps.add(filtered)
             }
 
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) {
-                filtered.recycle()
                 throw CancellationException("Cancelled before text overlay")
             }
 
             // 3. Draw Text Overlay
             val finalBitmap = if (config.textOverlay != null && config.textOverlay.text.isNotBlank()) {
                 val withText = drawTextOverlay(filtered, config.textOverlay)
-                if (withText != filtered) {
-                    filtered.recycle()
+                if (withText != filtered && withText != cropped && withText != rawBitmap) {
+                    intermediateBitmaps.add(withText)
                 }
                 withText
             } else {
                 filtered
             }
 
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) {
-                finalBitmap.recycle()
                 throw CancellationException("Cancelled before image compression")
             }
 
@@ -121,28 +125,58 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
                 finalBitmap.compress(compressFormat, 92, out)
             }
 
-            finalBitmap.recycle()
-
             if (!compressedSuccessfully) {
-                temp.delete()
                 return@withContext Result.failure(IllegalStateException("Bitmap compression returned false for format $ext"))
             }
 
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentCoroutineContext().ensureActive()
             if (isCancelled()) {
-                temp.delete()
                 throw CancellationException("Cancelled before finalization")
             }
 
-            storageManager.finalizeImageOutput(temp, input.name, ext, isCancelled)
+            val pubResult = storageManager.finalizeImageOutput(temp, input.name, ext, isCancelled)
+            if (pubResult.isSuccess) {
+                isPublishedSuccessfully = true
+            }
+            pubResult
+        } catch (e: CancellationException) {
+            Result.failure(e)
         } catch (e: Exception) {
-            tempFile?.let { if (it.exists()) it.delete() }
             Result.failure(e)
         } finally {
-            try { retriever.release() } catch (_: Exception) {}
+            withContext(NonCancellable) {
+                try {
+                    retriever.release()
+                } catch (_: Exception) {}
+
+                // Free all intermediate bitmaps guaranteed in finally
+                for (b in intermediateBitmaps) {
+                    if (!b.isRecycled) {
+                        try {
+                            b.recycle()
+                        } catch (_: Exception) {}
+                    }
+                }
+                intermediateBitmaps.clear()
+
+                // If not successfully published, clean up temp file
+                if (!isPublishedSuccessfully) {
+                    tempFile?.let {
+                        if (it.exists()) {
+                            try {
+                                it.delete()
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
         }
     }
 
+    /**
+     * Preview frame extraction for UI preview rendering.
+     * CRITICAL: The returned Bitmap is owned by the UI Composable caller and MUST NOT be recycled here.
+     */
     suspend fun extractPreviewFrame(
         context: Context,
         input: MediaItemInfo,
@@ -157,7 +191,7 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
         } catch (e: Exception) {
             null
         } finally {
-            try { retriever.release() } catch (e: Exception) {}
+            try { retriever.release() } catch (_: Exception) {}
         }
     }
 
@@ -166,12 +200,10 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
         val currentRatio = source.width.toFloat() / source.height.toFloat()
 
         val (targetWidth, targetHeight, startX, startY) = if (currentRatio > targetRatio) {
-            // Source is wider than target ratio
             val newWidth = (source.height * targetRatio).toInt().coerceAtMost(source.width)
             val x = (source.width - newWidth) / 2
             listOf(newWidth, source.height, x, 0)
         } else {
-            // Source is taller than target ratio
             val newHeight = (source.width / targetRatio).toInt().coerceAtMost(source.height)
             val y = (source.height - newHeight) / 2
             listOf(source.width, newHeight, 0, y)
@@ -191,26 +223,25 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
 
         val cm = ColorMatrix()
 
-        // Saturation
         if (saturation != 1f) {
             val satMatrix = ColorMatrix()
             satMatrix.setSaturation(saturation)
             cm.postConcat(satMatrix)
         }
 
-        // Contrast and Brightness
-        // Scale = contrast, offset = brightness
-        val scale = contrast
-        val translate = (1f - scale) * 128f + brightness
-        val contrastBrightnessMatrix = ColorMatrix(
-            floatArrayOf(
-                scale, 0f, 0f, 0f, translate,
-                0f, scale, 0f, 0f, translate,
-                0f, 0f, scale, 0f, translate,
-                0f, 0f, 0f, 1f, 0f
+        if (contrast != 1f || brightness != 0f) {
+            val scale = contrast
+            val translate = brightness * 255f
+            val cbMatrix = ColorMatrix(
+                floatArrayOf(
+                    scale, 0f, 0f, 0f, translate,
+                    0f, scale, 0f, 0f, translate,
+                    0f, 0f, scale, 0f, translate,
+                    0f, 0f, 0f, 1f, 0f
+                )
             )
-        )
-        cm.postConcat(contrastBrightnessMatrix)
+            cm.postConcat(cbMatrix)
+        }
 
         paint.colorFilter = ColorMatrixColorFilter(cm)
         canvas.drawBitmap(source, 0f, 0f, paint)
@@ -218,40 +249,48 @@ class ThumbnailEngine(private val storageManager: OutputStorageManager) {
     }
 
     private fun drawTextOverlay(source: Bitmap, overlay: TextOverlay): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
+        canvas.drawBitmap(source, 0f, 0f, null)
 
-        val scaledFontSize = (overlay.fontSizeSp / 16f) * (source.width / 25f).coerceAtLeast(32f)
-
-        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = overlay.textColor.toInt()
-            textSize = scaledFontSize
+            textSize = (overlay.fontSizeSp * (source.width / 400f)).coerceIn(18f, 120f)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
-            if (overlay.hasShadow) {
-                setShadowLayer(8f, 3f, 3f, Color.BLACK)
-            }
         }
 
-        val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = overlay.outlineColor.toInt()
-            textSize = scaledFontSize
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textSize = paint.textSize
+            typeface = paint.typeface
             textAlign = Paint.Align.CENTER
             style = Paint.Style.STROKE
-            strokeWidth = (scaledFontSize / 7f).coerceAtLeast(4f)
+            strokeWidth = paint.textSize * 0.15f
         }
 
-        val x = source.width * overlay.positionXPercent
-        val y = source.height * overlay.positionYPercent
-
-        // Draw outline first if enabled
-        if (overlay.hasOutline) {
-            canvas.drawText(overlay.text, x, y, outlinePaint)
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(160, 0, 0, 0)
+            style = Paint.Style.FILL
         }
 
-        // Draw fill text
-        canvas.drawText(overlay.text, x, y, fillPaint)
+        val x = (source.width * overlay.positionXPercent).coerceIn(10f, source.width - 10f)
+        val y = (source.height * overlay.positionYPercent).coerceIn(paint.textSize, source.height - 20f)
+
+        val textBounds = Rect()
+        paint.getTextBounds(overlay.text, 0, overlay.text.length, textBounds)
+
+        val padding = 16f
+        val bgRect = android.graphics.RectF(
+            x - (textBounds.width() / 2f) - padding,
+            y - textBounds.height() - padding,
+            x + (textBounds.width() / 2f) + padding,
+            y + padding
+        )
+        canvas.drawRoundRect(bgRect, 8f, 8f, bgPaint)
+
+        canvas.drawText(overlay.text, x, y, strokePaint)
+        canvas.drawText(overlay.text, x, y, paint)
 
         return output
     }

@@ -28,8 +28,8 @@ import com.example.core.model.SplitConfig
 import com.example.core.model.ThumbnailConfig
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -78,49 +78,17 @@ class Media3Engine(
         val initialBitrate = calculateTargetBitrate(input, config)
         val (targetWidth, targetHeight) = calculateDownscaleResolution(input, config)
 
-        val pass1File = storageManager.createTempFile("compress_pass1", "mp4")
+        val tempFilesToCleanup = mutableSetOf<File>()
+        var isSuccessfullyPublished = false
 
-        val pass1Result = runTransformerJob(
-            context = context,
-            input = input,
-            videoBitrateBps = initialBitrate,
-            targetWidth = targetWidth,
-            targetHeight = targetHeight,
-            removeAudio = config.removeAudio,
-            videoCodecMime = targetVideoCodec,
-            rotation = config.rotationDegrees,
-            trimStartMs = 0L,
-            trimEndMs = 0L,
-            outputFile = pass1File,
-            onProgress = onProgress,
-            isCancelled = isCancelled
-        )
+        try {
+            val pass1File = storageManager.createTempFile("compress_pass1", "mp4")
+            tempFilesToCleanup.add(pass1File)
 
-        if (!pass1Result.isSuccess) {
-            pass1File.delete()
-            return@withContext pass1Result
-        }
-
-        if (isCancelled()) {
-            pass1File.delete()
-            return@withContext Result.failure(CancellationException("Cancelled after encoding"))
-        }
-
-        var chosenOutputFile = pass1File
-
-        // 3. Target Size Iterative Correction Pass
-        // If actual size exceeds target by > 5%, run pass 2 from original source
-        if (config.preset == CompressionPreset.TARGET_SIZE && pass1File.length() > (config.targetSizeBytes * 1.05)) {
-            val actualSize = pass1File.length()
-            val ratio = config.targetSizeBytes.toDouble() / actualSize
-            val pass2Bitrate = (initialBitrate * ratio * 0.90).toInt().coerceIn(120_000, 10_000_000)
-
-            val pass2File = storageManager.createTempFile("compress_pass2", "mp4")
-
-            val pass2Result = runTransformerJob(
+            val pass1Result = runTransformerJob(
                 context = context,
-                input = input, // always encode from original source
-                videoBitrateBps = pass2Bitrate,
+                input = input,
+                videoBitrateBps = initialBitrate,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
                 removeAudio = config.removeAudio,
@@ -128,30 +96,89 @@ class Media3Engine(
                 rotation = config.rotationDegrees,
                 trimStartMs = 0L,
                 trimEndMs = 0L,
-                outputFile = pass2File,
+                outputFile = pass1File,
                 onProgress = onProgress,
                 isCancelled = isCancelled
             )
 
-            if (pass2Result.isSuccess && pass2File.exists() && pass2File.length() > 0) {
-                // Pass 2 succeeded: cleanup pass 1 and adopt pass 2
-                pass1File.delete()
-                chosenOutputFile = pass2File
-            } else {
-                // Pass 2 failed or cancelled: delete pass 2, preserve valid pass 1 file!
-                pass2File.delete()
-                // chosenOutputFile remains pass1File
+            if (!pass1Result.isSuccess) {
+                return@withContext pass1Result
+            }
+
+            if (isCancelled()) {
+                return@withContext Result.failure(CancellationException("Cancelled after encoding"))
+            }
+
+            var chosenOutputFile = pass1File
+
+            // 3. Target Size Iterative Correction Pass
+            // If actual size exceeds target by > 5%, run pass 2 from original source
+            if (config.preset == CompressionPreset.TARGET_SIZE && pass1File.length() > (config.targetSizeBytes * 1.05)) {
+                val actualSize = pass1File.length()
+                val ratio = config.targetSizeBytes.toDouble() / actualSize
+                val pass2Bitrate = (initialBitrate * ratio * 0.90).toInt().coerceIn(120_000, 10_000_000)
+
+                val pass2File = storageManager.createTempFile("compress_pass2", "mp4")
+                tempFilesToCleanup.add(pass2File)
+
+                val pass2Result = runTransformerJob(
+                    context = context,
+                    input = input, // always encode from original source
+                    videoBitrateBps = pass2Bitrate,
+                    targetWidth = targetWidth,
+                    targetHeight = targetHeight,
+                    removeAudio = config.removeAudio,
+                    videoCodecMime = targetVideoCodec,
+                    rotation = config.rotationDegrees,
+                    trimStartMs = 0L,
+                    trimEndMs = 0L,
+                    outputFile = pass2File,
+                    onProgress = onProgress,
+                    isCancelled = isCancelled
+                )
+
+                if (pass2Result.isSuccess && pass2File.exists() && pass2File.length() > 0) {
+                    // Pass 2 succeeded: cleanup pass 1 and adopt pass 2
+                    pass1File.delete()
+                    tempFilesToCleanup.remove(pass1File)
+                    chosenOutputFile = pass2File
+                } else {
+                    // Pass 2 failed or cancelled: delete pass 2, preserve valid pass 1 file!
+                    pass2File.delete()
+                    tempFilesToCleanup.remove(pass2File)
+                    // chosenOutputFile remains pass1File
+                }
+            }
+
+            // Finalize output into MediaStore
+            val finalResult = storageManager.finalizeVideoOutput(
+                tempFile = chosenOutputFile,
+                baseName = input.name,
+                jobType = JobType.COMPRESSION,
+                containerFormat = "mp4",
+                isCancelled = isCancelled
+            )
+
+            if (finalResult.isSuccess) {
+                isSuccessfullyPublished = true
+                tempFilesToCleanup.remove(chosenOutputFile)
+            }
+            finalResult
+        } catch (e: CancellationException) {
+            Result.failure(e)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            withContext(NonCancellable) {
+                if (!isSuccessfullyPublished) {
+                    for (file in tempFilesToCleanup) {
+                        try {
+                            if (file.exists()) file.delete()
+                        } catch (_: Exception) {}
+                    }
+                }
             }
         }
-
-        // Finalize output into MediaStore
-        storageManager.finalizeVideoOutput(
-            tempFile = chosenOutputFile,
-            baseName = input.name,
-            jobType = JobType.COMPRESSION,
-            containerFormat = "mp4",
-            isCancelled = isCancelled
-        )
     }
 
     override suspend fun editVideo(
@@ -161,35 +188,59 @@ class Media3Engine(
         onProgress: (Float) -> Unit,
         isCancelled: () -> Boolean
     ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
-        val tempFile = storageManager.createTempFile("edited", "mp4")
+        val tempFilesToCleanup = mutableSetOf<File>()
+        var isSuccessfullyPublished = false
 
-        val result = runTransformerJob(
-            context = context,
-            input = input,
-            videoBitrateBps = if (input.bitrateBps > 0) input.bitrateBps.toInt() else 3_000_000,
-            targetWidth = input.width,
-            targetHeight = input.height,
-            removeAudio = false,
-            videoCodecMime = MimeTypes.VIDEO_H264,
-            rotation = config.rotationDegrees,
-            trimStartMs = config.trimStartMs,
-            trimEndMs = if (config.trimEndMs > 0) config.trimEndMs else input.durationMs,
-            outputFile = tempFile,
-            onProgress = onProgress,
-            isCancelled = isCancelled
-        )
+        try {
+            val tempFile = storageManager.createTempFile("edited", "mp4")
+            tempFilesToCleanup.add(tempFile)
 
-        if (result.isSuccess) {
-            storageManager.finalizeVideoOutput(
-                tempFile = tempFile,
-                baseName = input.name,
-                jobType = JobType.EDITING,
-                containerFormat = "mp4",
+            val result = runTransformerJob(
+                context = context,
+                input = input,
+                videoBitrateBps = if (input.bitrateBps > 0) input.bitrateBps.toInt() else 3_000_000,
+                targetWidth = input.width,
+                targetHeight = input.height,
+                removeAudio = false,
+                videoCodecMime = MimeTypes.VIDEO_H264,
+                rotation = config.rotationDegrees,
+                trimStartMs = config.trimStartMs,
+                trimEndMs = if (config.trimEndMs > 0) config.trimEndMs else input.durationMs,
+                outputFile = tempFile,
+                onProgress = onProgress,
                 isCancelled = isCancelled
             )
-        } else {
-            tempFile.delete()
-            result
+
+            if (result.isSuccess) {
+                val finalResult = storageManager.finalizeVideoOutput(
+                    tempFile = tempFile,
+                    baseName = input.name,
+                    jobType = JobType.EDITING,
+                    containerFormat = "mp4",
+                    isCancelled = isCancelled
+                )
+                if (finalResult.isSuccess) {
+                    isSuccessfullyPublished = true
+                    tempFilesToCleanup.remove(tempFile)
+                }
+                finalResult
+            } else {
+                result
+            }
+        } catch (e: CancellationException) {
+            Result.failure(e)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            withContext(NonCancellable) {
+                if (!isSuccessfullyPublished) {
+                    for (file in tempFilesToCleanup) {
+                        try {
+                            if (file.exists()) file.delete()
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
         }
     }
 
@@ -201,7 +252,6 @@ class Media3Engine(
         onProgress: (Float) -> Unit,
         isCancelled: () -> Boolean
     ): Result<OutputMediaFile> {
-        // Fast stream copy audio extraction without video re-encoding
         return mediaCodecEngine.fastAudioDemux(context, input, onProgress, isCancelled)
     }
 
@@ -349,7 +399,7 @@ class Media3Engine(
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
-            withContext(kotlinx.coroutines.NonCancellable) {
+            withContext(NonCancellable) {
                 try {
                     progressJob?.cancel()
                 } catch (_: Exception) {}

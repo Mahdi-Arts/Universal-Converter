@@ -3,7 +3,8 @@
     <external-files-path name="external_movies" path="Movies/Universal Converter" />
     <external-files-path name="external_music" path="Music/Universal Converter" />
     <external-files-path name="external_pictures" path="Pictures/Universal Converter" />
-    <external-files-path name="external_files" path="." />
-    <files-path name="internal_files" path="Universal Converter" />
+    <files-path name="internal_movies" path="Movies/Universal Converter" />
+    <files-path name="internal_music" path="Music/Universal Converter" />
+    <files-path name="internal_pictures" path="Pictures/Universal Converter" />
     <cache-path name="cache_temp" path="universal_temp" />
 </paths>

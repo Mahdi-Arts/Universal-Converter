@@ -63,6 +63,7 @@ fun LibraryScreen(
     modifier: Modifier = Modifier
 ) {
     val outputs by viewModel.libraryOutputs.collectAsState()
+    val libraryError by viewModel.libraryError.collectAsState()
     var selectedTab by remember { mutableIntStateOf(0) } // 0: All, 1: Videos, 2: Audio, 3: Images
     var fileToDelete by remember { mutableStateOf<OutputMediaFile?>(null) }
 
@@ -132,7 +133,26 @@ fun LibraryScreen(
             }
         }
 
-        if (filteredOutputs.isEmpty()) {
+        if (libraryError != null && outputs.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 80.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(imageVector = Icons.Default.Delete, contentDescription = null, tint = StatusError, modifier = Modifier.size(48.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Error loading library: $libraryError",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = StatusError
+                        )
+                    }
+                }
+            }
+        } else if (filteredOutputs.isEmpty()) {
             item {
                 Box(
                     modifier = Modifier

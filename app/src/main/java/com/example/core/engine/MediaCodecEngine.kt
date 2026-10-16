@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.net.Uri
 import com.example.core.model.JobType
 import com.example.core.model.MediaItemInfo
 import com.example.core.model.OutputMediaFile
@@ -13,6 +14,8 @@ import com.example.core.model.SplitEngine
 import com.example.core.model.SplitMode
 import com.example.core.storage.OutputStorageManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -27,9 +30,10 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
         onProgress: (Float) -> Unit,
         isCancelled: () -> Boolean
     ): Result<OutputMediaFile> = withContext(Dispatchers.IO) {
+        val tempFile = storageManager.createTempFile("audio_demux", "m4a")
         val extractor = MediaExtractor()
         var muxer: MediaMuxer? = null
-        val tempFile = storageManager.createTempFile("fast_audio", "m4a")
+        var isSuccessfullyPublished = false
 
         try {
             extractor.setDataSource(context, input.uri, null)
@@ -47,7 +51,6 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             }
 
             if (audioTrackIndex == -1 || audioFormat == null) {
-                tempFile.delete()
                 return@withContext Result.failure(IllegalStateException("No audio track found in the video"))
             }
 
@@ -66,7 +69,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             val totalDurationUs = input.durationMs * 1000L
 
             while (!isCancelled()) {
-                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                currentCoroutineContext().ensureActive()
                 val sampleSize = extractor.readSampleData(buffer, 0)
                 if (sampleSize < 0) break
 
@@ -85,30 +88,45 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             }
 
             if (isCancelled()) {
-                try { muxer.release() } catch (_: Exception) {}
-                muxer = null
-                tempFile.delete()
                 return@withContext Result.failure(CancellationException("Audio extraction cancelled"))
             }
 
-            muxer.stop()
-            muxer.release()
-            muxer = null
+            try {
+                muxer.stop()
+            } catch (_: Exception) {}
 
-            storageManager.finalizeAudioOutput(
+            val finalResult = storageManager.finalizeAudioOutput(
                 tempFile = tempFile,
                 baseName = input.name,
                 jobType = JobType.AUDIO_EXTRACTION,
                 audioFormat = "m4a",
                 isCancelled = isCancelled
             )
+            if (finalResult.isSuccess) {
+                isSuccessfullyPublished = true
+            }
+            finalResult
+        } catch (e: CancellationException) {
+            Result.failure(e)
         } catch (e: Exception) {
-            try { muxer?.release() } catch (_: Exception) {}
-            tempFile.delete()
             Result.failure(e)
         } finally {
-            try { extractor.release() } catch (_: Exception) {}
-            try { muxer?.release() } catch (_: Exception) {}
+            withContext(NonCancellable) {
+                try {
+                    muxer?.release()
+                } catch (_: Exception) {}
+                muxer = null
+
+                try {
+                    extractor.release()
+                } catch (_: Exception) {}
+
+                if (!isSuccessfullyPublished && tempFile.exists()) {
+                    try {
+                        tempFile.delete()
+                    } catch (_: Exception) {}
+                }
+            }
         }
     }
 
@@ -119,7 +137,6 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
         onPartProgress: (currentPart: Int, totalParts: Int, progress: Float) -> Unit,
         isCancelled: () -> Boolean
     ): Result<List<OutputMediaFile>> = withContext(Dispatchers.IO) {
-        // Enforce honest feature support: Explicitly reject Precise Split if requested
         if (config.engine == SplitEngine.PRECISE_RE_ENCODE) {
             return@withContext Result.failure(
                 UnsupportedOperationException("Precise Split (Re-encode) is planned for the next release. Please select Fast Split (Stream Copy).")
@@ -167,21 +184,21 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
                 if (finalResult.isSuccess) {
                     successfulOutputs.add(finalResult.getOrThrow())
                 } else {
-                    tempFile.delete()
+                    if (tempFile.exists()) tempFile.delete()
                     if (firstError == null) firstError = finalResult.exceptionOrNull()
                 }
             } else {
-                tempFile.delete()
+                if (tempFile.exists()) tempFile.delete()
                 if (firstError == null) firstError = partResult.exceptionOrNull() ?: IllegalStateException("Segment $partNum failed")
             }
         }
 
         if (isCancelled()) {
             // Previous successful parts are preserved
-            if (successfulOutputs.isEmpty()) {
-                return@withContext Result.failure(CancellationException("Splitting cancelled"))
+            return@withContext if (successfulOutputs.isEmpty()) {
+                Result.failure(CancellationException("Splitting cancelled"))
             } else {
-                return@withContext Result.success(successfulOutputs)
+                Result.success(successfulOutputs)
             }
         }
 
@@ -194,7 +211,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
 
     private suspend fun extractSegmentStreamCopy(
         context: Context,
-        inputUri: android.net.Uri,
+        inputUri: Uri,
         startUs: Long,
         endUs: Long,
         outputFile: File,
@@ -234,7 +251,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
                 return Result.failure(IllegalStateException("No valid video or audio tracks found in source"))
             }
 
-            // CRITICAL: Select tracks BEFORE seeking so MediaExtractor seeks selected tracks correctly
+            // Select tracks BEFORE seeking so MediaExtractor seeks selected tracks correctly
             for (track in trackMap.keys) {
                 extractor.selectTrack(track)
             }
@@ -242,7 +259,6 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             // Seek to nearest prior sync keyframe for decodable boundary
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
 
-            // Determine actual start time from the keyframe position to avoid broken starting frames
             var actualStartUs = extractor.sampleTime
             if (actualStartUs < 0) actualStartUs = startUs
 
@@ -254,7 +270,7 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
             var initialPtsOffsetUs = -1L
 
             while (!isCancelled()) {
-                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                currentCoroutineContext().ensureActive()
                 val trackIndex = extractor.sampleTrackIndex
                 if (trackIndex < 0) break
 
@@ -291,16 +307,22 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
                 return Result.failure(CancellationException("Segment cancelled during extraction"))
             }
 
-            muxer.stop()
-            muxer.release()
-            muxer = null
+            try {
+                muxer.stop()
+            } catch (_: Exception) {}
 
             return Result.success(Unit)
         } catch (e: Exception) {
             return Result.failure(e)
         } finally {
-            try { extractor.release() } catch (_: Exception) {}
-            try { muxer?.release() } catch (_: Exception) {}
+            try {
+                muxer?.release()
+            } catch (_: Exception) {}
+            muxer = null
+
+            try {
+                extractor.release()
+            } catch (_: Exception) {}
         }
     }
 
@@ -326,12 +348,11 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
 
             when (config.mode) {
                 SplitMode.FIXED_DURATION -> {
-                    // Prevent infinite loop: enforce step of at least 1 second
                     val segMs = (config.durationSeconds.coerceAtLeast(1)) * 1000L
                     var cur = 0L
                     while (cur < totalDurationMs) {
                         val next = (cur + segMs).coerceAtMost(totalDurationMs)
-                        if (next <= cur) break // safety guard
+                        if (next <= cur) break
                         list.add(Pair(cur, next))
                         cur = next
                     }
@@ -361,25 +382,20 @@ class MediaCodecEngine(private val storageManager: OutputStorageManager) {
                     }
                 }
                 SplitMode.CUSTOM_TIMESTAMPS -> {
-                    // Filter out non-increasing and duplicate markers
-                    val sorted = config.customTimestampsMs
-                        .distinct()
-                        .sorted()
-                        .filter { it in 500L until totalDurationMs }
-                    var last = 0L
+                    val sorted = config.customTimestampsMs.filter { it in 1 until totalDurationMs }.sorted()
+                    var cur = 0L
                     for (ts in sorted) {
-                        if (ts > last) {
-                            list.add(Pair(last, ts))
-                            last = ts
+                        if (ts > cur) {
+                            list.add(Pair(cur, ts))
+                            cur = ts
                         }
                     }
-                    if (last < totalDurationMs) {
-                        list.add(Pair(last, totalDurationMs))
+                    if (cur < totalDurationMs) {
+                        list.add(Pair(cur, totalDurationMs))
                     }
                 }
             }
-
-            return list.filter { (start, end) -> end > start }
+            return list
         }
     }
 }

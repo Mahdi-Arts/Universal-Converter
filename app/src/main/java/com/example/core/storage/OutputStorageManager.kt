@@ -4,12 +4,15 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.database.Cursor
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.example.R
@@ -52,6 +55,9 @@ interface StorageSinkDelegate {
         selectionArgs: Array<String>?,
         sortOrder: String?
     ): Cursor?
+    fun getFileSize(uri: Uri): Long? {
+        return null
+    }
 }
 
 class DefaultStorageSinkDelegate(private val context: Context) : StorageSinkDelegate {
@@ -80,16 +86,30 @@ class DefaultStorageSinkDelegate(private val context: Context) : StorageSinkDele
     ): Cursor? {
         return context.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder)
     }
+
+    override fun getFileSize(uri: Uri): Long? {
+        return try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                pfd.statSize
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 }
 
 /**
- * Validates generated media structure before publication.
+ * Validates generated media structure before and after publication.
  */
 interface MediaOutputValidator {
     fun validate(file: File, jobType: JobType, mimeType: String): Result<Unit>
+    fun validateDestination(uri: Uri, jobType: JobType, mimeType: String): Result<Unit> {
+        return Result.success(Unit)
+    }
 }
 
 class DefaultMediaOutputValidator(private val context: Context) : MediaOutputValidator {
+
     override fun validate(file: File, jobType: JobType, mimeType: String): Result<Unit> {
         if (!file.exists() || file.length() <= 0L) {
             return Result.failure(IllegalStateException("File is missing or has zero size"))
@@ -98,19 +118,13 @@ class DefaultMediaOutputValidator(private val context: Context) : MediaOutputVal
         return try {
             when {
                 mimeType.startsWith("image/") || jobType == JobType.THUMBNAIL -> {
-                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(file.absolutePath, options)
-                    if (options.outWidth > 0 && options.outHeight > 0) {
-                        Result.success(Unit)
-                    } else {
-                        Result.failure(IllegalStateException("Invalid image: unable to decode dimensions"))
-                    }
+                    validateImageFile(file)
                 }
                 mimeType.startsWith("audio/") || jobType == JobType.AUDIO_EXTRACTION -> {
-                    validateAudio(file)
+                    validateAudioFile(file)
                 }
                 else -> {
-                    validateVideo(file)
+                    validateVideoFile(file)
                 }
             }
         } catch (e: Exception) {
@@ -118,69 +132,245 @@ class DefaultMediaOutputValidator(private val context: Context) : MediaOutputVal
         }
     }
 
-    private fun validateVideo(file: File): Result<Unit> {
-        val retriever = MediaMetadataRetriever()
+    override fun validateDestination(uri: Uri, jobType: JobType, mimeType: String): Result<Unit> {
         return try {
-            retriever.setDataSource(file.absolutePath)
-            val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
-            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-            val duration = durationStr?.toLongOrNull() ?: 0L
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                if (pfd.statSize <= 0L) {
+                    return Result.failure(IllegalStateException("Destination file descriptor has zero or negative size"))
+                }
 
-            if (hasVideo == "yes" || duration > 0L) {
-                Result.success(Unit)
-            } else {
-                // Secondary check using MediaExtractor in case retriever returns empty on certain containers
-                validateWithExtractor(file, isVideo = true)
-            }
-        } catch (_: Exception) {
-            validateWithExtractor(file, isVideo = true)
-        } finally {
-            try { retriever.release() } catch (_: Exception) {}
+                when {
+                    mimeType.startsWith("image/") || jobType == JobType.THUMBNAIL -> {
+                        validateImageFd(pfd)
+                    }
+                    mimeType.startsWith("audio/") || jobType == JobType.AUDIO_EXTRACTION -> {
+                        validateAudioFd(pfd)
+                    }
+                    else -> {
+                        validateVideoFd(pfd)
+                    }
+                }
+            } ?: Result.failure(IllegalStateException("Could not open FileDescriptor for destination URI"))
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
-    private fun validateAudio(file: File): Result<Unit> {
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(file.absolutePath)
-            val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-            val durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-            val duration = durationStr?.toLongOrNull() ?: 0L
+    private fun validateImageFile(file: File): Result<Unit> {
+        val bytes = ByteArray(12)
+        val read = try {
+            FileInputStream(file).use { it.read(bytes) }
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+        if (read < 4) {
+            return Result.failure(IllegalStateException("Invalid image: file too small"))
+        }
+        val isPng = (bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte())
+        val isJpg = (bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte())
+        val isWebp = (bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+                read >= 12 && bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() && bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte())
 
-            if (hasAudio == "yes" || duration > 0L) {
-                Result.success(Unit)
-            } else {
-                validateWithExtractor(file, isVideo = false)
+        if (!isPng && !isJpg && !isWebp) {
+            return Result.failure(IllegalStateException("Invalid image: unrecognized format header"))
+        }
+
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, options)
+        if (options.outWidth <= 0 || options.outHeight <= 0) {
+            return Result.failure(IllegalStateException("Invalid image: unable to decode dimensions"))
+        }
+
+        // Bounded memory sample decode to verify image is decodable
+        val decodeOptions = BitmapFactory.Options().apply {
+            inJustDecodeBounds = false
+            inSampleSize = 4
+        }
+        val sampledBitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+            ?: return Result.failure(IllegalStateException("Failed to decode sample image frames"))
+        sampledBitmap.recycle()
+
+        return Result.success(Unit)
+    }
+
+    private fun validateImageFd(pfd: ParcelFileDescriptor): Result<Unit> {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFileDescriptor(pfd.fileDescriptor, null, options)
+        if (options.outWidth <= 0 || options.outHeight <= 0) {
+            return Result.failure(IllegalStateException("Invalid destination image dimensions"))
+        }
+        return Result.success(Unit)
+    }
+
+    private fun validateVideoFile(file: File): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        var hasVideoMetadata = false
+        var duration = 0L
+        var width = 0
+        var height = 0
+
+        try {
+            retriever.setDataSource(file.absolutePath)
+            val hasVideoStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+
+            // Positive duration alone does NOT prove video; hasVideo must be "yes" or width/height > 0
+            if (hasVideoStr == "yes" && width > 0 && height > 0 && duration > 0L) {
+                hasVideoMetadata = true
             }
         } catch (_: Exception) {
-            validateWithExtractor(file, isVideo = false)
         } finally {
             try { retriever.release() } catch (_: Exception) {}
         }
-    }
 
-    private fun validateWithExtractor(file: File, isVideo: Boolean): Result<Unit> {
+        if (hasVideoMetadata) {
+            return Result.success(Unit)
+        }
+
+        // Verify structure via MediaExtractor
         val extractor = MediaExtractor()
-        return try {
+        try {
             extractor.setDataSource(file.absolutePath)
             if (extractor.trackCount <= 0) {
-                return Result.failure(IllegalStateException("No tracks found in media file"))
+                return Result.failure(IllegalStateException("No tracks found in video file"))
             }
-            val prefix = if (isVideo) "video/" else "audio/"
-            var found = false
+            var foundVideoTrack = false
             for (i in 0 until extractor.trackCount) {
                 val format = extractor.getTrackFormat(i)
-                val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
-                if (mime.startsWith(prefix)) {
-                    found = true
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) {
+                    foundVideoTrack = true
                     break
                 }
             }
-            if (found) Result.success(Unit) else Result.failure(IllegalStateException("No valid track found"))
+            return if (foundVideoTrack) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("File has audio but no video track; audio cannot be accepted as video"))
+            }
+        } catch (e: Exception) {
+            return Result.failure(e)
+        } finally {
+            try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun validateVideoFd(pfd: ParcelFileDescriptor): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(pfd.fileDescriptor)
+            val hasVideoStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+
+            if (hasVideoStr == "yes" && width > 0 && height > 0 && duration > 0L) {
+                Result.success(Unit)
+            } else {
+                // Secondary check via extractor on fd
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(pfd.fileDescriptor)
+                    var foundVideo = false
+                    for (i in 0 until extractor.trackCount) {
+                        val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("video/")) {
+                            foundVideo = true
+                            break
+                        }
+                    }
+                    if (foundVideo) Result.success(Unit) else Result.failure(IllegalStateException("Destination missing video track"))
+                } finally {
+                    try { extractor.release() } catch (_: Exception) {}
+                }
+            }
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun validateAudioFile(file: File): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        var hasAudioMetadata = false
+        var hasVideo = false
+        var duration = 0L
+
+        try {
+            retriever.setDataSource(file.absolutePath)
+            val hasAudioStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+            val hasVideoStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+
+            if (hasVideoStr == "yes") {
+                hasVideo = true
+            }
+            if (hasAudioStr == "yes" && duration > 0L) {
+                hasAudioMetadata = true
+            }
+        } catch (_: Exception) {
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+
+        if (hasAudioMetadata && !hasVideo) {
+            return Result.success(Unit)
+        }
+
+        // Verify structure via MediaExtractor
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            if (extractor.trackCount <= 0) {
+                return Result.failure(IllegalStateException("No tracks found in audio file"))
+            }
+            var foundAudioTrack = false
+            var foundVideoTrack = false
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("audio/")) {
+                    foundAudioTrack = true
+                }
+                if (mime.startsWith("video/")) {
+                    foundVideoTrack = true
+                }
+            }
+
+            return when {
+                foundVideoTrack -> Result.failure(IllegalStateException("Video file cannot be accepted as pure audio output"))
+                foundAudioTrack -> Result.success(Unit)
+                else -> Result.failure(IllegalStateException("No valid audio track found in file"))
+            }
+        } catch (e: Exception) {
+            return Result.failure(e)
+        } finally {
             try { extractor.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun validateAudioFd(pfd: ParcelFileDescriptor): Result<Unit> {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(pfd.fileDescriptor)
+            val hasAudioStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+            val hasVideoStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+
+            if (hasVideoStr == "yes") {
+                Result.failure(IllegalStateException("Destination has video track; cannot be audio output"))
+            } else if (hasAudioStr == "yes" && duration > 0L) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("Destination audio track or duration invalid"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
         }
     }
 }
@@ -289,7 +479,7 @@ class OutputStorageManager(
     }
 
     /**
-     * Unified, robust publication pipeline across Video, Audio, and Image:
+     * Unified publication pipeline across Video, Audio, and Image:
      * PREPARING -> COPYING -> VALIDATING -> PUBLISHING -> COMPLETED
      */
     private suspend fun executePublicationPipeline(
@@ -306,6 +496,7 @@ class OutputStorageManager(
         var stage = PublicationStage.PREPARING
         var insertedMediaStoreUri: Uri? = null
         var stagingAppSpecificFile: File? = null
+        var finalAppSpecificFile: File? = null
         var isPublishedSuccessfully = false
 
         try {
@@ -345,6 +536,12 @@ class OutputStorageManager(
 
                 copyBoundedWithCancellation(tempFile, outStream, isCancelled)
 
+                // Verify destination size
+                val destSize = sinkDelegate.getFileSize(inserted)
+                if (destSize != null && destSize >= 0L && destSize != sourceSizeBytes) {
+                    throw IllegalStateException("Destination size mismatch: destination size is $destSize, expected $sourceSizeBytes")
+                }
+
                 // Stage 3: VALIDATING
                 stage = PublicationStage.VALIDATING
                 currentCoroutineContext().ensureActive()
@@ -357,11 +554,16 @@ class OutputStorageManager(
                     throw IllegalStateException("Media validation failed: ${valResult.exceptionOrNull()?.message}")
                 }
 
-                // Stage 4: PUBLISHING
+                val destValResult = mediaValidator.validateDestination(inserted, jobType, mimeType)
+                if (destValResult.isFailure) {
+                    throw IllegalStateException("Destination validation failed: ${destValResult.exceptionOrNull()?.message}")
+                }
+
+                // Stage 4: PUBLISHING (Commit Boundary)
                 stage = PublicationStage.PUBLISHING
                 currentCoroutineContext().ensureActive()
                 if (isCancelled()) {
-                    throw CancellationException("Cancelled before final publish")
+                    throw CancellationException("Cancelled before final publish commit")
                 }
 
                 val finishValues = ContentValues().apply {
@@ -389,7 +591,16 @@ class OutputStorageManager(
             } else {
                 // App-Specific Storage with FileProvider (Android 7-9 or fallback)
                 val targetDir = getAppSpecificDirectory(directoryType)
+                if (!targetDir.exists() && !targetDir.mkdirs()) {
+                    throw IllegalStateException("Failed to create destination directory: ${targetDir.absolutePath}")
+                }
+                if (targetDir.usableSpace > 0 && targetDir.usableSpace < sourceSizeBytes) {
+                    throw IllegalStateException("Insufficient storage space on device")
+                }
+
                 val finalFile = generateUniqueAppSpecificFile(targetDir, targetDisplayName)
+                finalAppSpecificFile = finalFile
+
                 val stagingFile = File(targetDir, "${finalFile.name}.staging_${System.currentTimeMillis()}")
                 stagingAppSpecificFile = stagingFile
 
@@ -410,7 +621,7 @@ class OutputStorageManager(
                     throw IllegalStateException("Media validation failed: ${valResult.exceptionOrNull()?.message}")
                 }
 
-                // Stage 4: PUBLISHING
+                // Stage 4: PUBLISHING (Commit Boundary)
                 stage = PublicationStage.PUBLISHING
                 currentCoroutineContext().ensureActive()
                 if (isCancelled()) {
@@ -458,6 +669,11 @@ class OutputStorageManager(
                             if (staging.exists()) staging.delete()
                         } catch (_: Exception) {}
                     }
+                    finalAppSpecificFile?.let { finalFile ->
+                        try {
+                            if (finalFile.exists()) finalFile.delete()
+                        } catch (_: Exception) {}
+                    }
                 }
                 // Temp file is always safely removed once reader/writer is finished
                 try {
@@ -498,14 +714,25 @@ class OutputStorageManager(
     }
 
     internal fun getAppSpecificDirectory(directoryType: String): File {
-        val external = context.getExternalFilesDir(directoryType)
+        val external = try {
+            context.getExternalFilesDir(directoryType)
+        } catch (_: Exception) {
+            null
+        }
         val base = if (external != null && (external.canWrite() || external.mkdirs())) {
             external
         } else {
             File(context.filesDir, directoryType)
         }
         val appFolder = File(base, folderName)
-        if (!appFolder.exists()) appFolder.mkdirs()
+        if (!appFolder.exists()) {
+            val created = appFolder.mkdirs()
+            if (!created && !appFolder.exists()) {
+                val fallback = File(context.filesDir, "$directoryType/$folderName")
+                fallback.mkdirs()
+                return fallback
+            }
+        }
         return appFolder
     }
 
@@ -535,36 +762,44 @@ class OutputStorageManager(
         }
     }
 
-    suspend fun listExportedOutputs(): List<OutputMediaFile> = withContext(Dispatchers.IO) {
+    suspend fun queryExportedOutputs(): Result<List<OutputMediaFile>> = withContext(Dispatchers.IO) {
         val list = mutableListOf<OutputMediaFile>()
         val seenIds = mutableSetOf<String>()
+        var queryError: Throwable? = null
 
-        // 1. MediaStore query (Android 10+ with strict folder filter, or legacy with strict folder matching)
+        // 1. MediaStore query (Android 10+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            queryMediaStoreCategory(
-                uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                isVideo = true,
-                isAudio = false,
-                isImage = false,
-                list = list,
-                seenIds = seenIds
-            )
-            queryMediaStoreCategory(
-                uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                isVideo = false,
-                isAudio = true,
-                isImage = false,
-                list = list,
-                seenIds = seenIds
-            )
-            queryMediaStoreCategory(
-                uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                isVideo = false,
-                isAudio = false,
-                isImage = true,
-                list = list,
-                seenIds = seenIds
-            )
+            try {
+                queryMediaStoreCategory(
+                    uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    relativeDir = "${Environment.DIRECTORY_MOVIES}/$folderName",
+                    isVideo = true,
+                    isAudio = false,
+                    isImage = false,
+                    list = list,
+                    seenIds = seenIds
+                )
+                queryMediaStoreCategory(
+                    uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    relativeDir = "${Environment.DIRECTORY_MUSIC}/$folderName",
+                    isVideo = false,
+                    isAudio = true,
+                    isImage = false,
+                    list = list,
+                    seenIds = seenIds
+                )
+                queryMediaStoreCategory(
+                    uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    relativeDir = "${Environment.DIRECTORY_PICTURES}/$folderName",
+                    isVideo = false,
+                    isAudio = false,
+                    isImage = true,
+                    list = list,
+                    seenIds = seenIds
+                )
+            } catch (e: Exception) {
+                queryError = e
+            }
         }
 
         // 2. Query App-Specific Storage (covers Android 7-9, fallback, and app-specific files)
@@ -574,120 +809,153 @@ class OutputStorageManager(
             Environment.DIRECTORY_PICTURES
         )
         for (dirType in directories) {
-            scanAppSpecificFolder(dirType, list, seenIds)
+            try {
+                // External files dir
+                val extDir = try { context.getExternalFilesDir(dirType) } catch (_: Exception) { null }
+                if (extDir != null) {
+                    scanAppSpecificFolder(File(extDir, folderName), dirType, list, seenIds)
+                }
+                // Internal files dir
+                val intDir = File(context.filesDir, "$dirType/$folderName")
+                scanAppSpecificFolder(intDir, dirType, list, seenIds)
+            } catch (e: Exception) {
+                if (queryError == null) queryError = e
+            }
         }
 
-        list.sortedByDescending { it.dateAddedMs }
+        if (queryError != null && list.isEmpty()) {
+            Result.failure(queryError)
+        } else {
+            Result.success(list.sortedByDescending { it.dateAddedMs })
+        }
+    }
+
+    suspend fun listExportedOutputs(): List<OutputMediaFile> {
+        return queryExportedOutputs().getOrDefault(emptyList())
     }
 
     private fun queryMediaStoreCategory(
         uri: Uri,
+        relativeDir: String,
         isVideo: Boolean,
         isAudio: Boolean,
         isImage: Boolean,
         list: MutableList<OutputMediaFile>,
         seenIds: MutableSet<String>
     ) {
-        try {
-            val projection = arrayOf(
-                MediaStore.MediaColumns._ID,
-                MediaStore.MediaColumns.DISPLAY_NAME,
-                MediaStore.MediaColumns.SIZE,
-                MediaStore.MediaColumns.DATE_ADDED,
-                MediaStore.MediaColumns.MIME_TYPE
-            )
-            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-            val selectionArgs = arrayOf("%$folderName%")
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.DATE_ADDED,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.DURATION
+        )
+        // Exact relative path matching to prevent false positives from LIKE
+        val selection = "(${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} = ?) AND (${MediaStore.MediaColumns.IS_PENDING} IS NULL OR ${MediaStore.MediaColumns.IS_PENDING} = 0)"
+        val selectionArgs = arrayOf("$relativeDir/", relativeDir)
 
-            sinkDelegate.queryMediaStore(
-                uri,
-                projection,
-                selection,
-                selectionArgs,
-                "${MediaStore.MediaColumns.DATE_ADDED} DESC"
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
-                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
-                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
-                val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+        sinkDelegate.queryMediaStore(
+            uri,
+            projection,
+            selection,
+            selectionArgs,
+            "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+            val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+            val durCol = cursor.getColumnIndex(MediaStore.MediaColumns.DURATION)
 
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(idCol)
-                    val name = cursor.getString(nameCol) ?: "Media"
-                    val size = cursor.getLong(sizeCol)
-                    val date = cursor.getLong(dateCol) * 1000
-                    val mime = cursor.getString(mimeCol) ?: if (isVideo) "video/mp4" else if (isAudio) "audio/mp4" else "image/png"
-                    val contentUri = Uri.withAppendedPath(uri, id.toString())
-                    val idKey = contentUri.toString()
-
-                    if (seenIds.add(idKey)) {
-                        val jobType = inferJobType(name, isVideo, isAudio, isImage)
-                        list.add(
-                            OutputMediaFile(
-                                id = idKey,
-                                displayName = name,
-                                uri = contentUri,
-                                path = idKey,
-                                sizeBytes = size,
-                                durationMs = 0L,
-                                dateAddedMs = date,
-                                type = jobType,
-                                mimeType = mime
-                            )
-                        )
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun scanAppSpecificFolder(
-        directoryType: String,
-        list: MutableList<OutputMediaFile>,
-        seenIds: MutableSet<String>
-    ) {
-        try {
-            val targetDir = getAppSpecificDirectory(directoryType)
-            val files = targetDir.listFiles() ?: return
-
-            for (file in files) {
-                if (!file.isFile || file.name.contains(".staging_") || file.length() <= 0L) continue
-
-                val contentUri = try {
-                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                } catch (_: Exception) {
-                    continue
-                }
-
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
+                val name = cursor.getString(nameCol) ?: "Media"
+                val size = cursor.getLong(sizeCol)
+                val date = cursor.getLong(dateCol) * 1000
+                val mime = cursor.getString(mimeCol) ?: if (isVideo) "video/mp4" else if (isAudio) "audio/mp4" else "image/png"
+                val duration = if (durCol != -1) cursor.getLong(durCol) else 0L
+                val contentUri = Uri.withAppendedPath(uri, id.toString())
                 val idKey = contentUri.toString()
-                if (seenIds.add(idKey)) {
-                    val isVideo = directoryType == Environment.DIRECTORY_MOVIES
-                    val isAudio = directoryType == Environment.DIRECTORY_MUSIC
-                    val isImage = directoryType == Environment.DIRECTORY_PICTURES
-                    val jobType = inferJobType(file.name, isVideo, isAudio, isImage)
-                    val mime = when {
-                        isVideo -> if (file.name.endsWith(".webm", ignoreCase = true)) "video/webm" else "video/mp4"
-                        isAudio -> if (file.name.endsWith(".mp3", ignoreCase = true)) "audio/mpeg" else "audio/mp4"
-                        else -> if (file.name.endsWith(".webp", ignoreCase = true)) "image/webp" else if (file.name.endsWith(".jpg", ignoreCase = true) || file.name.endsWith(".jpeg", ignoreCase = true)) "image/jpeg" else "image/png"
-                    }
 
+                if (seenIds.add(idKey)) {
+                    val jobType = inferJobType(name, isVideo, isAudio, isImage)
                     list.add(
                         OutputMediaFile(
                             id = idKey,
-                            displayName = file.name,
+                            displayName = name,
                             uri = contentUri,
-                            path = file.absolutePath,
-                            sizeBytes = file.length(),
-                            durationMs = 0L,
-                            dateAddedMs = file.lastModified(),
+                            path = idKey,
+                            sizeBytes = size,
+                            durationMs = duration,
+                            dateAddedMs = date,
                             type = jobType,
                             mimeType = mime
                         )
                     )
                 }
             }
-        } catch (_: Exception) {}
+        }
+    }
+
+    private fun scanAppSpecificFolder(
+        targetDir: File,
+        directoryType: String,
+        list: MutableList<OutputMediaFile>,
+        seenIds: MutableSet<String>
+    ) {
+        if (!targetDir.exists()) return
+        val files = targetDir.listFiles() ?: return
+
+        for (file in files) {
+            if (!file.isFile || file.name.contains(".staging_") || file.length() <= 0L) continue
+
+            val contentUri = try {
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            } catch (_: Exception) {
+                continue
+            }
+
+            val idKey = contentUri.toString()
+            if (seenIds.add(idKey)) {
+                val isVideo = directoryType == Environment.DIRECTORY_MOVIES
+                val isAudio = directoryType == Environment.DIRECTORY_MUSIC
+                val isImage = directoryType == Environment.DIRECTORY_PICTURES
+                val jobType = inferJobType(file.name, isVideo, isAudio, isImage)
+                val mime = when {
+                    isVideo -> if (file.name.endsWith(".webm", ignoreCase = true)) "video/webm" else "video/mp4"
+                    isAudio -> if (file.name.endsWith(".mp3", ignoreCase = true)) "audio/mpeg" else "audio/mp4"
+                    else -> if (file.name.endsWith(".webp", ignoreCase = true)) "image/webp" else if (file.name.endsWith(".jpg", ignoreCase = true) || file.name.endsWith(".jpeg", ignoreCase = true)) "image/jpeg" else "image/png"
+                }
+
+                var duration = 0L
+                if (isVideo || isAudio) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(file.absolutePath)
+                        duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    } catch (_: Exception) {
+                    } finally {
+                        try { retriever.release() } catch (_: Exception) {}
+                    }
+                }
+
+                list.add(
+                    OutputMediaFile(
+                        id = idKey,
+                        displayName = file.name,
+                        uri = contentUri,
+                        path = file.absolutePath,
+                        sizeBytes = file.length(),
+                        durationMs = duration,
+                        dateAddedMs = file.lastModified(),
+                        type = jobType,
+                        mimeType = mime
+                    )
+                )
+            }
+        }
     }
 
     private fun inferJobType(name: String, isVideo: Boolean, isAudio: Boolean, isImage: Boolean): JobType {
@@ -727,15 +995,22 @@ class OutputStorageManager(
         }
     }
 
-    private fun isAppOwnedFile(file: File): Boolean {
-        val path = file.canonicalPath
-        val externalFiles = context.getExternalFilesDir(null)?.canonicalPath
-        val internalFiles = context.filesDir.canonicalPath
-        val cacheFiles = context.cacheDir.canonicalPath
+    private fun isPathInsideDirectory(child: File, parent: File): Boolean {
+        val childCanonical = child.canonicalPath
+        val parentCanonical = parent.canonicalPath
+        return childCanonical == parentCanonical || childCanonical.startsWith(parentCanonical + File.separator)
+    }
 
-        return (externalFiles != null && path.startsWith(externalFiles)) ||
-                path.startsWith(internalFiles) ||
-                path.startsWith(cacheFiles)
+    internal fun isAppOwnedFile(file: File): Boolean {
+        val externalFiles = context.getExternalFilesDir(null)
+        val internalFiles = context.filesDir
+        val cacheFiles = context.cacheDir
+
+        val inExternal = externalFiles != null && isPathInsideDirectory(file, externalFiles)
+        val inInternal = isPathInsideDirectory(file, internalFiles)
+        val inCache = isPathInsideDirectory(file, cacheFiles)
+
+        return inExternal || inInternal || inCache
     }
 
     fun openFile(outputFile: OutputMediaFile): Result<Unit> {
